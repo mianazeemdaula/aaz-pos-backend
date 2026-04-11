@@ -49,6 +49,8 @@ export interface HeaderOptions {
     titleFont?: Partial<FontConfig>;
     subtitleFont?: Partial<FontConfig>;
     filterInfo?: Record<string, string | number>;
+    qrCode?: Buffer;
+    qrCodeSize?: number;
 }
 
 export interface FooterOptions {

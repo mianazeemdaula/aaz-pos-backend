@@ -41,6 +41,7 @@ export function applyFont(
 
 /**
  * Generate PDF Header Component
+ * Layout: [Logo | Company Info] | [Report Title / Subtitle / Date / Filters] | [QR Code]
  */
 export function generateHeader(
     doc: PDFDocumentType,
@@ -53,134 +54,139 @@ export function generateHeader(
 
     let yPos = startY;
     const headerStartY = yPos;
+    const qrSize = options.qrCodeSize || 60;
+    const hasQR = !!options.qrCode;
 
-    // Background
-    if (options.backgroundColor) {
-        const headerHeight = options.height || 100;
-        doc.rect(startX, yPos, pageWidth, headerHeight)
-            .fill(options.backgroundColor);
-        doc.fillColor("#000000"); // Reset color
-    }
+    // Background band
+    const headerHeight = options.height || 80;
+    doc.save();
+    // doc.rect(startX - 5, yPos - 5, pageWidth + 10, headerHeight + 10)
+    //     .fill(options.backgroundColor || "#f8fafc");
+    // doc.fillColor("#000000");
+    doc.restore();
 
-    // Calculate left side width (for logo and company info only)
-    const leftSideWidth = pageWidth * 0.50;
-    const rightSideWidth = pageWidth * 0.50;
-    const rightSideX = startX + leftSideWidth;
+    // Accent bar on the left
+    // doc.save();
+    // doc.rect(startX - 5, yPos - 5, 4, headerHeight + 10).fill("#2563eb");
+    // doc.restore();
 
-    // LEFT SIDE - Logo and Company Info
-    let logoYPos = yPos;
+    // ── Column widths ──
+    const logoW = options.logo ? (options.logo.width || 55) + 12 : 0;
+    const qrW = hasQR ? qrSize + 15 : 0;
+    const companyW = Math.min(pageWidth * 0.30, 200);
+    const centerW = pageWidth - logoW - companyW - qrW;
+
+    let colX = startX;
+
+    // ── COLUMN 1: Logo ──
     if (options.logo && fs.existsSync(options.logo.path)) {
-        const logoWidth = options.logo.width || 60;
-        const logoHeight = options.logo.height || 60;
-        doc.image(options.logo.path, startX, yPos, {
-            width: logoWidth,
-            height: logoHeight,
-        });
+        const lw = options.logo.width || 55;
+        const lh = options.logo.height || 55;
+        const logoY = yPos + Math.max(0, (headerHeight - lh) / 2 - 5);
+        doc.image(options.logo.path, colX, logoY, { width: lw, height: lh });
+        colX += logoW;
     }
 
-    // Company Info (next to logo)
-    const contentX = options.logo ? startX + (options.logo.width || 60) + 15 : startX;
+    // ── COLUMN 2: Company Info ──
     let leftY = yPos;
+    const companyName = options.companyName || "Dubai Mart Sweets & Bakers";
+    const address = options.address || "Near Lari Ada, Depalpur";
+    const phone = options.phone || "0306-1073000";
 
+    applyFont(doc, { family: "Helvetica-Bold", size: 13, color: "#1e293b" });
+    doc.text(companyName.toLocaleUpperCase(), colX, leftY, { width: companyW - 5, align: "left" });
+    leftY = doc.y + 1;
 
-    const companyName = "Dubai Mart Sweets & Bakers";
-    const address = "Near Lari Ada, Depalpur";
-    const phone = "0306-1073000";
+    applyFont(doc, { family: "Helvetica", size: 8, color: "#64748b" });
+    doc.text(address, colX, leftY, { width: companyW - 5, align: "left" });
+    leftY = doc.y + 1;
 
-    // Company Name
-    if (companyName) {
-        applyFont(doc, { family: "Helvetica-Bold", size: 12, color: "#000000" });
-        doc.text(companyName, contentX, leftY, {
-            width: leftSideWidth - (options.logo ? (options.logo.width || 60) + 15 : 0),
-            align: "left",
-        });
-        leftY = doc.y + 2;
-    }
+    applyFont(doc, { family: "Helvetica", size: 8, color: "#64748b" });
+    doc.text(`Tel: ${phone}`, colX, leftY, { width: companyW - 5, align: "left" });
+    leftY = doc.y;
 
-    // Address
-    if (address) {
-        applyFont(doc, { family: "Helvetica", size: 8, color: "#666666" });
-        doc.text(address, contentX, leftY, {
-            width: leftSideWidth - (options.logo ? (options.logo.width || 60) + 15 : 0),
-            align: "left",
-        });
-        leftY = doc.y + 2;
-    }
+    colX += companyW;
 
-    // Phone
-    if (phone) {
-        applyFont(doc, { family: "Helvetica", size: 8, color: "#666666" });
-        doc.text(`Tel: ${phone}`, contentX, leftY, {
-            width: leftSideWidth - (options.logo ? (options.logo.width || 60) + 15 : 0),
-            align: "left",
-        });
-        leftY = doc.y;
-    }
+    // ── Vertical separator ──
+    doc.save();
+    doc.moveTo(colX - 5, yPos).lineTo(colX - 5, yPos + headerHeight - 5)
+        .strokeColor("#cbd5e1").lineWidth(0.5).stroke();
+    doc.restore();
 
-    // RIGHT SIDE - Title, Subtitle, Date, and Filter Info
-    const rightX = rightSideX + 10;
-    let rightY = headerStartY;
+    // ── COLUMN 3: Report Title, Subtitle, Date, Filters ──
+    let rightY = yPos;
 
-    // Title
-    applyFont(doc, options.titleFont || { size: 8 });
-    doc.text(options.title, rightX, rightY, {
-        width: rightSideWidth - 15,
-        align: "left",
-    });
-    rightY = doc.y + 3;
+    // Title (bold, colored)
+    applyFont(doc, options.titleFont || { family: "Helvetica-Bold", size: 14, color: "#1e40af" });
+    doc.text(options.title, colX, rightY, { width: centerW - 5, align: "left" });
+    rightY = doc.y + 2;
 
     // Subtitle
     if (options.subtitle) {
-        applyFont(doc, options.subtitleFont || { size: 10, color: "#666666" });
-        doc.text(options.subtitle, rightX, rightY, {
-            width: rightSideWidth - 15,
-            align: "left",
-        });
-        rightY = doc.y + 3;
+        applyFont(doc, options.subtitleFont || { size: 9, color: "#475569" });
+        doc.text(options.subtitle, colX, rightY, { width: centerW - 5, align: "left" });
+        rightY = doc.y + 2;
     }
 
     // Date
     if (options.showDate) {
-        const dateFormat = options.dateFormat || "DD MMM YYYY HH:mm";
-        applyFont(doc, options.font || { size: 8, color: "#999999" });
-        doc.text(`Generated: ${dayjs().format(dateFormat)}`, rightX, rightY, {
-            width: rightSideWidth - 15,
-            align: "left",
-        });
-        rightY = doc.y + 5;
+        const dateFormat = options.dateFormat || "DD MMM YYYY, hh:mm A";
+        applyFont(doc, { size: 7, color: "#94a3b8" });
+        doc.text(`Generated: ${dayjs().format(dateFormat)}`, colX, rightY, { width: centerW - 5, align: "left" });
+        rightY = doc.y + 4;
     }
 
-    // Filter Info Box (Right Side, below title/subtitle/date)
-    if (options.filterInfo) {
-        const filterStartY = rightY;
+    // Filter Info - compact pills
+    if (options.filterInfo && Object.keys(options.filterInfo).length > 0) {
+        const entries = Object.entries(options.filterInfo);
 
-        // Calculate filter box height
-        const filterItemHeight = 10;
-        // Render filter info
-        let filterX = rightX;
-        const filterItemWidth = (rightSideWidth) / Object.keys(options.filterInfo).length;
+        // Draw a subtle background box for the filter area
+        const filterBoxH = Math.ceil(entries.length / 2) * 14 + 6;
+        doc.save();
+        doc.roundedRect(colX, rightY, centerW - 10, filterBoxH, 3)
+            .fill("#eff6ff");
+        doc.fillColor("#000000");
+        doc.restore();
 
-        Object.entries(options.filterInfo).forEach(([label, value]) => {
-            applyFont(doc, { family: "Helvetica-Bold", size: 8 });
-            doc.text(label + ":", filterX, filterStartY, { continued: true });
-
-            applyFont(doc, { family: "Helvetica", size: 8 });
-            doc.text(" " + value, {});
-            filterX += filterItemWidth;
+        let fX = colX + 5;
+        let fY = rightY + 3;
+        const colWidth = (centerW - 20) / 2;
+        entries.forEach(([label, value], idx) => {
+            if (idx > 0 && idx % 2 === 0) { fX = colX + 5; fY += 14; }
+            applyFont(doc, { family: "Helvetica-Bold", size: 7, color: "#1e40af" });
+            doc.text(`${label}:`, fX, fY, { continued: true, width: colWidth });
+            applyFont(doc, { family: "Helvetica", size: 7, color: "#334155" });
+            doc.text(` ${value}`, { width: colWidth });
+            fX += colWidth;
         });
-        rightY = filterStartY + filterItemHeight;
+        rightY = fY + 16;
     }
 
-    // Use the maximum Y position from left or right side
-    yPos = Math.max(leftY, rightY);
+    colX += centerW;
 
-    // Bottom border
-    // yPos += 10;
-    doc.moveTo(startX, yPos)
-        .lineTo(startX + pageWidth, yPos)
-        .stroke("#333333");
+    // ── COLUMN 4: QR Code ──
+    if (hasQR && options.qrCode) {
+        // QR code is passed as a data URI buffer — render it as an image
+        try {
+            const qrY = yPos + Math.max(0, (headerHeight - qrSize) / 2 - 5);
+            doc.image(options.qrCode, colX, qrY, { width: qrSize, height: qrSize });
+        } catch {
+            // Silently skip if QR rendering fails
+        }
+    }
 
-    yPos += 5;
+    // Use the maximum Y position
+    yPos = Math.max(leftY, rightY, headerStartY + headerHeight);
+
+    // Bottom border - gradient-like double line
+    doc.save();
+    doc.moveTo(startX, yPos + 2).lineTo(startX + pageWidth, yPos + 2)
+        .strokeColor("#2563eb").lineWidth(1.5).stroke();
+    doc.moveTo(startX, yPos + 5).lineTo(startX + pageWidth, yPos + 5)
+        .strokeColor("#e2e8f0").lineWidth(0.5).stroke();
+    doc.restore();
+
+    yPos += 10;
     doc.y = yPos;
 
     return yPos;

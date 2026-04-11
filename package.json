@@ -53,13 +53,15 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.0",
     "multer": "^2.1.1",
-    "pdfkit": "^0.17.2"
+    "pdfkit": "^0.17.2",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20.5.1",
+    "@types/qrcode": "^1.5.6",
     "javascript-obfuscator": "^4.2.2",
     "pkg": "^5.8.1",
     "prisma": "^7.3.0",

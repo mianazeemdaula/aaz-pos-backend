@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import dayjs from "dayjs";
 import path from "path";
+import QRCode from "qrcode";
 import { prisma } from "../prisma/prisma";
 import { createPDFGenerator, getReportFontTheme } from "../utils/pdf";
 import { generateSignatureSection } from "../utils/pdf/pdfkit-components";
@@ -40,7 +41,8 @@ function pdfConfig(
     subtitle: string,
     filterInfo: Record<string, string | number>,
     orientation: "portrait" | "landscape" = "portrait",
-    size: "A4" | "A5" | "A3" = "A4"
+    size: "A4" | "A5" | "A3" = "A4",
+    qrCodeBuffer?: Buffer
 ) {
     const reportFonts = fonts();
     return {
@@ -54,11 +56,13 @@ function pdfConfig(
         header: {
             title,
             subtitle,
-            logo: { path: logoPath, width: 60, height: 60 },
+            logo: { path: logoPath, width: 55, height: 55 },
             showDate: true,
-            titleFont: { family: "Helvetica-Bold" as const, size: 16 },
-            subtitleFont: { size: 10, color: "#666666" },
+            titleFont: { family: "Helvetica-Bold" as const, size: 14, color: "#1e40af" },
+            subtitleFont: { size: 9, color: "#475569" },
             filterInfo,
+            qrCode: qrCodeBuffer,
+            qrCodeSize: 55,
         },
         footer: {
             leftText: "POS System",
@@ -67,6 +71,14 @@ function pdfConfig(
             font: { size: 8, color: "#666666" },
         },
     };
+}
+
+async function generateQRBuffer(text: string): Promise<Buffer | undefined> {
+    try {
+        return await QRCode.toBuffer(text, { width: 150, margin: 1, color: { dark: "#1e293b", light: "#ffffff" } });
+    } catch {
+        return undefined;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -372,12 +384,13 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
             due: sale.totalAmount - sale.paidAmount,
         }));
 
+        const salesQr = await generateQRBuffer(`Sales Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Txns: ${sales.length}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Sales Report", "Sales Transaction Summary", {
                 "From": from ? fmtDate(from as string) : "All Time",
                 "To": to ? fmtDate(to as string) : "Now",
                 "Transactions": sales.length,
-            }, "landscape")
+            }, "landscape", "A4", salesQr)
         );
         const doc = pdfGen.getDocument();
 
@@ -492,12 +505,13 @@ export const getPurchasesReportPDF = async (req: Request, res: Response): Promis
             due: p.totalAmount - p.paidAmount,
         }));
 
+        const purchQr = await generateQRBuffer(`Purchases Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Orders: ${purchases.length}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Purchases Report", "Purchase Order Summary", {
                 "From": from ? fmtDate(from as string) : "All Time",
                 "To": to ? fmtDate(to as string) : "Now",
                 "Total Orders": purchases.length,
-            }, "landscape")
+            }, "landscape", "A4", purchQr)
         );
         const doc = pdfGen.getDocument();
 
@@ -579,9 +593,21 @@ export const getPurchasesReportPDF = async (req: Request, res: Response): Promis
 
 export const getInventoryReportPDF = async (req: Request, res: Response): Promise<void> => {
     try {
+        // Set a longer timeout for large inventories
+        req.setTimeout(120_000);
+
         const products = await prisma.product.findMany({
             where: { active: true },
-            include: { category: { select: { name: true } }, brand: { select: { name: true } }, variants: true },
+            select: {
+                id: true,
+                name: true,
+                totalStock: true,
+                reorderLevel: true,
+                avgCostPrice: true,
+                category: { select: { name: true } },
+                brand: { select: { name: true } },
+                variants: { select: { price: true }, take: 1 },
+            },
             orderBy: { name: "asc" },
         });
 
@@ -601,13 +627,14 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
             status: p.totalStock <= 0 ? "Out of Stock" : p.totalStock <= p.reorderLevel ? "Low Stock" : "OK",
         }));
 
+        const qr = await generateQRBuffer(`Inventory Report | ${dayjs().format("DD-MM-YYYY")} | Products: ${products.length} | Value: ${fmtCurrency(totalValue)}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Inventory Report", "Product Stock Overview", {
                 "Total Products": products.length,
                 "Low Stock": lowStock.length,
                 "Out of Stock": outOfStock.length,
                 "Total Value": fmtCurrency(totalValue),
-            }, "landscape")
+            }, "landscape", "A4", qr)
         );
         const doc = pdfGen.getDocument();
 
@@ -713,12 +740,13 @@ export const getExpensesReportPDF = async (req: Request, res: Response): Promise
             amount: e.amount,
         }));
 
+        const expQr = await generateQRBuffer(`Expenses Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Records: ${expenses.length}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Expenses Report", "Expense Transactions", {
                 "From": from ? fmtDate(from as string) : "All Time",
                 "To": to ? fmtDate(to as string) : "Now",
                 "Total Records": expenses.length,
-            })
+            }, undefined, undefined, expQr)
         );
         const doc = pdfGen.getDocument();
 
@@ -800,12 +828,13 @@ export const getCustomerBalancesReportPDF = async (req: Request, res: Response):
             status: c.balance > 0 ? "Receivable" : "Overpaid",
         }));
 
+        const custQr = await generateQRBuffer(`Customer Balances | Customers: ${customers.length} | Receivable: ${fmtCurrency(totalReceivable)}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Customer Balances Report", "Accounts Receivable", {
                 "Total Customers": customers.length,
                 "Total Receivable": fmtCurrency(totalReceivable),
                 "Total Overpaid": fmtCurrency(totalOverpaid),
-            })
+            }, undefined, undefined, custQr)
         );
         const doc = pdfGen.getDocument();
 
@@ -894,12 +923,13 @@ export const getSupplierBalancesReportPDF = async (req: Request, res: Response):
             status: s.balance > 0 ? "Payable" : "Overpaid",
         }));
 
+        const suppQr = await generateQRBuffer(`Supplier Balances | Suppliers: ${suppliers.length} | Payable: ${fmtCurrency(totalPayable)}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Supplier Balances Report", "Accounts Payable", {
                 "Total Suppliers": suppliers.length,
                 "Total Payable": fmtCurrency(totalPayable),
                 "Total Overpaid": fmtCurrency(totalOverpaid),
-            })
+            }, undefined, undefined, suppQr)
         );
         const doc = pdfGen.getDocument();
 
@@ -1914,6 +1944,7 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
         else if (filter === "low") { rows = lowStock; title = "Low Stock Report"; }
         else if (filter === "alert") { rows = [...negative, ...lowStock]; title = "Stock Alert Report"; }
 
+        const stockQr = await generateQRBuffer(`${title} | Products: ${rows.length} | Negative: ${negative.length} | Low: ${lowStock.length}`);
         const pdfGen = createPDFGenerator(pdfConfig(
             title,
             "Inventory Stock Levels",
@@ -1924,7 +1955,9 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
                 "Normal Stock": normal.length,
                 "Generated": fmtDate(new Date()),
             },
-            "landscape"
+            "landscape",
+            undefined,
+            stockQr
         ));
         const doc = pdfGen.getDocument();
 
@@ -2055,6 +2088,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
         const dailyRecurringExpenses = recurringExpenses.reduce((s, x) => s + (x.frequency == 'MONTHLY' ? x.amount / 30 : x.amount), 0);
         const netProfit = grossProfit - totalExpenses - totalSalaries;
 
+        const dailyQr = await generateQRBuffer(`Daily Report | ${fmtDate(dateStr)} | Sales: ${sales.length} | Purchases: ${purchases.length}`);
         const pdfGen = createPDFGenerator(pdfConfig(
             "Daily Report",
             `Summary for ${fmtDate(dateStr)}`,
@@ -2064,7 +2098,9 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
                 "Purchases": purchases.length,
                 "Expenses": expenses.length,
             },
-            "portrait"
+            "portrait",
+            undefined,
+            dailyQr
         ));
         const doc = pdfGen.getDocument();
 
