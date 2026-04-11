@@ -4,10 +4,14 @@ import { getPaginationParams, createPaginatedResponse } from "../utils/paginatio
 
 // ---- HELD SALES ----
 
+const PRIVILEGED_ROLES = ["ADMIN", "MANAGER"];
+
 export const listHeldSales = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
     const userId = req.user?.id;
-    const where: any = { userId };
+    const role = req.user?.role ?? "";
+    const isPrivileged = PRIVILEGED_ROLES.includes(role);
+    const where: any = isPrivileged ? {} : { userId };
     if (req.query.status) where.status = req.query.status;
 
     try {
@@ -80,7 +84,9 @@ export const cancelHeldSale = async (req: Request, res: Response): Promise<void>
 export const listHeldPurchases = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
     const userId = req.user?.id;
-    const where: any = { userId };
+    const role = req.user?.role ?? "";
+    const isPrivileged = PRIVILEGED_ROLES.includes(role);
+    const where: any = isPrivileged ? {} : { userId };
     if (req.query.status) where.status = req.query.status;
 
     try {

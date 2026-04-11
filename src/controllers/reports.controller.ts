@@ -21,6 +21,20 @@ function fmtDate(v: any, fmt = "DD MMM YYYY") {
     return v ? dayjs(v).format(fmt) : "N/A";
 }
 
+/**
+ * Returns a trustworthy avg cost price.
+ * If avgCostPrice is corrupted (negative, non-finite, or > 1 billion — caused by
+ * the weighted-average formula compounding on negative stock), falls back to 95%
+ * of the variant sale price.
+ */
+function safeAvgCost(avgCostPrice: number, variantPrice: number): number {
+    if (avgCostPrice > 0 && Number.isFinite(avgCostPrice) && avgCostPrice < 1e9) {
+        return avgCostPrice;
+    }
+    const fallback = variantPrice * 0.95;
+    return fallback > 0 ? fallback : 0;
+}
+
 function pdfConfig(
     title: string,
     subtitle: string,
@@ -145,7 +159,7 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         const outOfStockCount = allActiveProducts.filter(p => p.totalStock <= 0).length;
         const totalProducts = allActiveProducts.length;
         const totalInventoryValue = allActiveProducts.reduce(
-            (s, p) => s + p.totalStock * (p.avgCostPrice > 0 ? p.avgCostPrice : (p.variants[0]?.price * 0.95 || 0)),
+            (s, p) => s + p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0),
             0
         );
 
@@ -573,7 +587,7 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
 
         const lowStock = products.filter((p) => p.totalStock > 0 && p.totalStock <= p.reorderLevel);
         const outOfStock = products.filter((p) => p.totalStock <= 0);
-        const totalValue = products.reduce((s, p) => s + p.totalStock * (p.avgCostPrice > 0 ? p.avgCostPrice : p.variants[0].price * 0.95), 0);
+        const totalValue = products.reduce((s, p) => s + p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0), 0);
 
         const rows = products.map((p, i) => ({
             sno: i + 1,
@@ -582,8 +596,8 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
             brand: p.brand?.name ?? "N/A",
             totalStock: p.totalStock,
             reorderLevel: p.reorderLevel,
-            avgCost: p.avgCostPrice > 0 ? p.avgCostPrice : p.variants[0].price * 0.95,
-            stockValue: p.totalStock * (p.avgCostPrice > 0 ? p.avgCostPrice : p.variants[0].price * 0.95),
+            avgCost: safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0),
+            stockValue: p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0),
             status: p.totalStock <= 0 ? "Out of Stock" : p.totalStock <= p.reorderLevel ? "Low Stock" : "OK",
         }));
 
@@ -1871,5 +1885,434 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
     } catch (error) {
         console.error("Account statement PDF error:", error);
         res.status(500).json({ error: "Failed to generate account statement PDF", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STOCK REPORT — negative + low-stock products PDF
+// ═══════════════════════════════════════════════════════════════════════════════
+export const getStockReportPDF = async (req: Request, res: Response): Promise<void> => {
+    const filter = (req.query.filter as string) ?? "all"; // all | negative | low
+    try {
+        const products = await prisma.product.findMany({
+            where: { active: true, isService: false },
+            orderBy: { name: "asc" },
+            include: {
+                category: { select: { name: true } },
+                brand: { select: { name: true } },
+                variants: { select: { name: true, barcode: true, price: true, isDefault: true }, orderBy: { isDefault: "desc" } },
+            },
+        });
+
+        const negative = products.filter(p => p.totalStock < 0);
+        const lowStock = products.filter(p => p.totalStock >= 0 && p.totalStock <= p.reorderLevel);
+        const normal = products.filter(p => p.totalStock > p.reorderLevel);
+
+        let rows = products;
+        let title = "Full Stock Report";
+        if (filter === "negative") { rows = negative; title = "Negative Stock Report"; }
+        else if (filter === "low") { rows = lowStock; title = "Low Stock Report"; }
+        else if (filter === "alert") { rows = [...negative, ...lowStock]; title = "Stock Alert Report"; }
+
+        const pdfGen = createPDFGenerator(pdfConfig(
+            title,
+            "Inventory Stock Levels",
+            {
+                "Total Products": rows.length,
+                "Negative Stock": negative.length,
+                "Low Stock": lowStock.length,
+                "Normal Stock": normal.length,
+                "Generated": fmtDate(new Date()),
+            },
+            "landscape"
+        ));
+        const doc = pdfGen.getDocument();
+
+        doc.x = doc.page.margins.left;
+        const table = doc.table({
+            columnStyles: ["auto", "*", "*", 60, 60, 70, 80, 80],
+            rowStyles: (row: number) => {
+                if (row === 0) return { backgroundColor: "#1e293b", textColor: "#ffffff", fontSize: 9, fontStyle: "bold" };
+                const p = rows[row - 1];
+                if (!p) return {};
+                if (p.totalStock < 0) return { backgroundColor: "#fee2e2" };
+                if (p.totalStock <= p.reorderLevel) return { backgroundColor: "#fef9c3" };
+                return {};
+            },
+        });
+
+        table.row([
+            { text: "#", align: { x: "center", y: "center" } },
+            { text: "Product Name", align: { x: "left", y: "center" } },
+            { text: "Category", align: { x: "left", y: "center" } },
+            { text: "Barcode", align: { x: "center", y: "center" } },
+            { text: "Stock", align: { x: "center", y: "center" } },
+            { text: "Reorder Lvl", align: { x: "center", y: "center" } },
+            { text: "Avg Cost", align: { x: "right", y: "center" } },
+            { text: "Status", align: { x: "center", y: "center" } },
+        ]);
+
+        rows.forEach((p, i) => {
+            const defaultVariant = p.variants.find(v => v.isDefault) ?? p.variants[0];
+            const status = p.totalStock < 0 ? "⚠ NEGATIVE" : p.totalStock <= p.reorderLevel ? "⚡ LOW" : "✓ OK";
+            table.row([
+                { text: String(i + 1), align: { x: "center", y: "center" } },
+                { text: p.name, align: { x: "left", y: "center" } },
+                { text: p.category.name, align: { x: "left", y: "center" } },
+                { text: defaultVariant?.barcode ?? "—", align: { x: "center", y: "center" } },
+                { text: String(p.totalStock), align: { x: "center", y: "center" } },
+                { text: String(p.reorderLevel), align: { x: "center", y: "center" } },
+                { text: fmtCurrency(safeAvgCost(p.avgCostPrice, defaultVariant?.price ?? 0)), align: { x: "right", y: "center" } },
+                { text: status, align: { x: "center", y: "center" } },
+            ]);
+        });
+        table.end();
+
+        await pdfGen.sendToResponse(res, `stock-report-${filter}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+    } catch (error) {
+        console.error("Stock report PDF error:", error);
+        res.status(500).json({ error: "Failed to generate stock report PDF" });
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DAILY REPORT — comprehensive: sales, purchases, expenses, recurring, salaries,
+//               P&L, accounts, discounts for a given date
+// ═══════════════════════════════════════════════════════════════════════════════
+export const getDailyReportPDF = async (req: Request, res: Response): Promise<void> => {
+    const dateStr = (req.query.date as string) ?? dayjs().format("YYYY-MM-DD");
+    const startOfDay = dayjs(dateStr).startOf("day").toDate();
+    const endOfDay = dayjs(dateStr).endOf("day").toDate();
+
+    try {
+        const [
+            sales,
+            purchases,
+            expenses,
+            recurringExpenses,
+            salarySlips,
+            customerPayments,
+            supplierPayments,
+        ] = await Promise.all([
+            prisma.sale.findMany({
+                where: { createdAt: { gte: startOfDay, lte: endOfDay } },
+                include: {
+                    customer: { select: { name: true } },
+                    items: { select: { quantity: true, avgCostPrice: true, totalPrice: true, discount: true } },
+                    payments: { include: { account: { select: { name: true } } } },
+                },
+                orderBy: { createdAt: "asc" },
+            }),
+            prisma.purchase.findMany({
+                where: { date: { gte: startOfDay, lte: endOfDay } },
+                include: {
+                    supplier: { select: { name: true } },
+                    items: { select: { quantity: true, unitCost: true, totalCost: true } },
+                    payments: { include: { account: { select: { name: true } } } },
+                },
+                orderBy: { date: "asc" },
+            }),
+            prisma.expense.findMany({
+                where: { date: { gte: startOfDay, lte: endOfDay } },
+                include: { account: { select: { name: true } } },
+                orderBy: { date: "asc" },
+            }),
+            prisma.recurringExpense.findMany({ where: { active: true } }),
+            prisma.salarySlip.findMany({
+                where: { paidDate: { gte: startOfDay, lte: endOfDay } },
+                include: { employee: { select: { name: true } } },
+                orderBy: { paidDate: "asc" },
+            }),
+            prisma.customerPayment.findMany({
+                where: { date: { gte: startOfDay, lte: endOfDay } },
+                include: { customer: { select: { name: true } }, account: { select: { name: true } } },
+                orderBy: { date: "asc" },
+            }),
+            prisma.supplierPayment.findMany({
+                where: { date: { gte: startOfDay, lte: endOfDay } },
+                include: { supplier: { select: { name: true } }, account: { select: { name: true } } },
+                orderBy: { date: "asc" },
+            }),
+        ]);
+
+        // ── Aggregates ──
+        const totalRevenue = sales.reduce((s, x) => s + x.totalAmount, 0);
+        const totalDiscount = sales.reduce((s, x) => s + x.discount, 0);
+        const totalTax = sales.reduce((s, x) => s + x.taxAmount, 0);
+        const totalCOGS = sales.reduce((s, x) =>
+            s + x.items.reduce((is, item) => is + item.avgCostPrice * item.quantity, 0), 0);
+        const totalSalesPaid = sales.reduce((s, x) => s + x.paidAmount, 0);
+        // const totalSalesDue = totalRevenue - totalSalesPaid;
+        const grossProfit = totalRevenue - totalCOGS;
+
+        const totalPurchases = purchases.reduce((s, x) => s + x.totalAmount, 0);
+        const totalPurchasesPaid = purchases.reduce((s, x) => s + x.paidAmount, 0);
+
+        const totalExpenses = expenses.reduce((s, x) => s + x.amount, 0);
+        const totalSalaries = salarySlips.reduce((s, x) => s + x.netPayable, 0);
+        const totalCustPayments = customerPayments.reduce((s, x) => s + x.amount, 0);
+        const totalSuppPayments = supplierPayments.reduce((s, x) => s + x.amount, 0);
+        const dailyRecurringExpenses = recurringExpenses.reduce((s, x) => s + (x.frequency == 'MONTHLY' ? x.amount / 30 : x.amount), 0);
+        const netProfit = grossProfit - totalExpenses - totalSalaries;
+
+        const pdfGen = createPDFGenerator(pdfConfig(
+            "Daily Report",
+            `Summary for ${fmtDate(dateStr)}`,
+            {
+                "Date": fmtDate(dateStr),
+                "Sales": sales.length,
+                "Purchases": purchases.length,
+                "Expenses": expenses.length,
+            },
+            "portrait"
+        ));
+        const doc = pdfGen.getDocument();
+
+        const sectionHeader = (title: string, color = "#1e293b") => {
+            doc.x = doc.page.margins.left;
+            doc.fontSize(11).fillColor(color).text(title);
+            doc.moveDown(0.3);
+        };
+
+        // ── P&L Summary Table ──
+        sectionHeader("Daily P&L Summary", "#1e40af");
+        doc.x = doc.page.margins.left;
+        doc.fontSize(8);
+        const summaryTable = doc.table({
+            columnStyles: ["*", "*"],
+            rowStyles: (row: number) => {
+                if (row === 0) return { backgroundColor: "#dbeafe", fontSize: 10, fontStyle: "bold" };
+                if (row % 2 === 0) return { backgroundColor: "#f8fafc" };
+                return {};
+            },
+        });
+        [
+            ["Metric", "Amount (Rs)"],
+            [`Sales Revenue (${sales.length} invoices)`, fmtCurrency(totalRevenue)],
+            [`  Discount Given`, fmtCurrency(totalDiscount)],
+            [`  Tax Collected`, fmtCurrency(totalTax)],
+            [`  COGS`, fmtCurrency(totalCOGS)],
+            [`  Gross Profit`, fmtCurrency(grossProfit)],
+            [`Purchases (${purchases.length} orders)`, fmtCurrency(totalPurchases)],
+            [`Expenses (${expenses.length})`, fmtCurrency(totalExpenses)],
+            [`Recurring Expenses (Daily)`, fmtCurrency(dailyRecurringExpenses)],
+            [`Salaries Paid (${salarySlips.length})`, fmtCurrency(totalSalaries)],
+            [`Customer Payments Received`, fmtCurrency(totalCustPayments)],
+            [`Supplier Payments Made`, fmtCurrency(totalSuppPayments)],
+            [`Net Profit`, fmtCurrency(netProfit)],
+        ].forEach((row, i) => {
+            summaryTable.row([
+                { text: row[0], align: { x: "left", y: "center" } },
+                { text: i === 0 ? row[1] : row[1], align: { x: "right", y: "center" } },
+            ]);
+        });
+        summaryTable.end();
+        pdfGen.moveDown(0.8);
+
+        // ── Sales table ──
+        // if (sales.length > 0) {
+        //     sectionHeader(`Sales (${sales.length})`, "#166534");
+        //     doc.x = doc.page.margins.left;
+        //     const t = doc.table({
+        //         columnStyles: [30, 70, "*", 70, 70, 70, 60],
+        //         rowStyles: (row: number) => row === 0 ? { backgroundColor: "#dcfce7", fontStyle: "bold", fontSize: 9 } : {},
+        //     });
+        //     t.row(["#", "Time", "Customer", "Discount", "Tax", "Total", "Paid"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
+        //     sales.forEach((s, i) => {
+        //         t.row([
+        //             { text: String(i + 1), align: { x: "center", y: "center" } },
+        //             { text: fmtDate(s.createdAt, "hh:mm A"), align: { x: "center", y: "center" } },
+        //             { text: s.customer?.name ?? "Walk-in", align: { x: "left", y: "center" } },
+        //             { text: fmtCurrency(s.discount), align: { x: "right", y: "center" } },
+        //             { text: fmtCurrency(s.taxAmount), align: { x: "right", y: "center" } },
+        //             { text: fmtCurrency(s.totalAmount), align: { x: "right", y: "center" } },
+        //             { text: fmtCurrency(s.paidAmount), align: { x: "right", y: "center" } },
+        //         ]);
+        //     });
+        //     t.row([
+        //         { text: "Total", colSpan: 3, align: { x: "right", y: "center" } },
+        //         { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
+        //         { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
+        //         { text: fmtCurrency(totalRevenue), align: { x: "right", y: "center" } },
+        //         { text: fmtCurrency(totalSalesPaid), align: { x: "right", y: "center" } },
+        //     ]);
+        //     t.end();
+        //     pdfGen.moveDown(0.8);
+        // }
+
+        // ── Purchases table ──
+        if (purchases.length > 0) {
+            sectionHeader(`Purchases (${purchases.length})`, "#1e3a8a");
+            doc.x = doc.page.margins.left;
+            doc.fontSize(8);
+            const t = doc.table({
+                columnStyles: [30, 70, "*", 80, 80],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#dbeafe", fontStyle: "bold", fontSize: 9 } : {},
+            });
+            t.row(["#", "Time", "Supplier", "Total", "Paid"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
+            purchases.forEach((p, i) => {
+                t.row([
+                    { text: String(i + 1), align: { x: "center", y: "center" } },
+                    { text: fmtDate(p.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: p.supplier?.name ?? "N/A", align: { x: "left", y: "center" } },
+                    { text: fmtCurrency(p.totalAmount), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(p.paidAmount), align: { x: "right", y: "center" } },
+                ]);
+            });
+            t.row([
+                { text: "Total", colSpan: 3, align: { x: "right", y: "center" } },
+                { text: fmtCurrency(totalPurchases), align: { x: "right", y: "center" } },
+                { text: fmtCurrency(totalPurchasesPaid), align: { x: "right", y: "center" } },
+            ]);
+            t.end();
+            pdfGen.moveDown(0.8);
+        }
+
+        // ── Expenses table ──
+        if (expenses.length > 0) {
+            sectionHeader(`Expenses (${expenses.length})`, "#7c2d12");
+            doc.fontSize(8);
+            doc.x = doc.page.margins.left;
+            const t = doc.table({
+                columnStyles: [30, 70, "*", "*", 80],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#fee2e2", fontStyle: "bold", fontSize: 9 } : {},
+            });
+            t.row(["#", "Time", "Description", "Category", "Amount"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
+            expenses.forEach((ex, i) => {
+                t.row([
+                    { text: String(i + 1), align: { x: "center", y: "center" } },
+                    { text: fmtDate(ex.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: ex.description, align: { x: "left", y: "center" } },
+                    { text: ex.category, align: { x: "left", y: "center" } },
+                    { text: fmtCurrency(ex.amount), align: { x: "right", y: "center" } },
+                ]);
+            });
+            t.row([
+                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
+                { text: fmtCurrency(totalExpenses), align: { x: "right", y: "center" } },
+            ]);
+            t.end();
+            pdfGen.moveDown(0.8);
+        }
+
+        // ── Salaries table ──
+        if (salarySlips.length > 0) {
+            sectionHeader(`Salaries Paid (${salarySlips.length})`, "#5b21b6");
+            doc.x = doc.page.margins.left;
+            doc.fontSize(8);
+            const t = doc.table({
+                columnStyles: [30, "*", 70, 70, 80],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ede9fe", fontStyle: "bold", fontSize: 9 } : {},
+            });
+            t.row(["#", "Employee", "Month/Year", "Advances", "Net Paid"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
+            salarySlips.forEach((sl, i) => {
+                t.row([
+                    { text: String(i + 1), align: { x: "center", y: "center" } },
+                    { text: sl.employee.name, align: { x: "left", y: "center" } },
+                    { text: `${sl.month}/${sl.year}`, align: { x: "center", y: "center" } },
+                    { text: fmtCurrency(sl.totalAdvances), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(sl.netPayable), align: { x: "right", y: "center" } },
+                ]);
+            });
+            t.row([
+                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
+                { text: fmtCurrency(totalSalaries), align: { x: "right", y: "center" } },
+            ]);
+            t.end();
+            pdfGen.moveDown(0.8);
+        }
+
+        // ── Customer payments ──
+        if (customerPayments.length > 0) {
+            sectionHeader(`Customer Payments Received (${customerPayments.length})`, "#0f766e");
+            doc.x = doc.page.margins.left;
+            doc.fontSize(8);
+            const t = doc.table({
+                columnStyles: [30, 70, "*", "*", 80],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ccfbf1", fontStyle: "bold", fontSize: 9 } : {},
+            });
+            t.row(["#", "Time", "Customer", "Account", "Amount"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
+            customerPayments.forEach((cp, i) => {
+                t.row([
+                    { text: String(i + 1), align: { x: "center", y: "center" } },
+                    { text: fmtDate(cp.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: cp.customer.name, align: { x: "left", y: "center" } },
+                    { text: cp.account.name, align: { x: "left", y: "center" } },
+                    { text: fmtCurrency(cp.amount), align: { x: "right", y: "center" } },
+                ]);
+            });
+            t.row([
+                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
+                { text: fmtCurrency(totalCustPayments), align: { x: "right", y: "center" } },
+            ]);
+            t.end();
+            pdfGen.moveDown(0.8);
+        }
+
+        // ── Supplier payments ──
+        if (supplierPayments.length > 0) {
+            sectionHeader(`Supplier Payments Made (${supplierPayments.length})`, "#9a3412");
+            doc.x = doc.page.margins.left;
+            doc.fontSize(8);
+            const t = doc.table({
+                columnStyles: [30, 70, "*", "*", 80],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ffedd5", fontStyle: "bold", fontSize: 9 } : {},
+            });
+            t.row(["#", "Time", "Supplier", "Account", "Amount"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
+            supplierPayments.forEach((sp, i) => {
+                t.row([
+                    { text: String(i + 1), align: { x: "center", y: "center" } },
+                    { text: fmtDate(sp.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: sp.supplier.name, align: { x: "left", y: "center" } },
+                    { text: sp.account.name, align: { x: "left", y: "center" } },
+                    { text: fmtCurrency(sp.amount), align: { x: "right", y: "center" } },
+                ]);
+            });
+            t.row([
+                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
+                { text: fmtCurrency(totalSuppPayments), align: { x: "right", y: "center" } },
+            ]);
+            t.end();
+            pdfGen.moveDown(0.8);
+        }
+
+        // ── Recurring Expenses note ──
+        if (recurringExpenses.length > 0) {
+            sectionHeader(`Active Recurring Expenses (${recurringExpenses.length})`, "#92400e");
+            doc.x = doc.page.margins.left;
+            doc.fontSize(8);
+            const t = doc.table({
+                columnStyles: ["*", "*", "*", 80],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#fef3c7", fontStyle: "bold", fontSize: 9 } : {},
+            });
+            t.row(["Name", "Category", "Frequency", "Amount (Rs)"].map(h => ({ text: h, align: { x: "left", y: "center" } })));
+            recurringExpenses.forEach(re => {
+                t.row([
+                    { text: re.name, align: { x: "left", y: "center" } },
+                    { text: re.category, align: { x: "left", y: "center" } },
+                    { text: re.frequency, align: { x: "left", y: "center" } },
+                    { text: fmtCurrency(re.amount), align: { x: "right", y: "center" } },
+                ]);
+            });
+            t.end();
+            pdfGen.moveDown(0.8);
+        }
+
+        generateSignatureSection(doc, {
+            signatures: [
+                { label: "Prepared By", name: "_________________", title: "Cashier" },
+                { label: "Reviewed By", name: "_________________", title: "Manager" },
+                { label: "Approved By", name: "_________________", title: "Owner" },
+            ],
+            spacing: 30,
+            lineWidth: 120,
+            labelFont: { family: "Helvetica-Bold", size: 8 },
+            nameFont: { size: 9 },
+        });
+
+        await pdfGen.sendToResponse(res, `daily-report-${dateStr}.pdf`);
+    } catch (error) {
+        console.error("Daily report PDF error:", error);
+        res.status(500).json({ error: "Failed to generate daily report PDF", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };

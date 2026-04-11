@@ -147,7 +147,9 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                             const unitPrice = Number(item.unitPrice);
                             const qty = Number(item.qty);
                             const itemDiscount = item.discount ?? 0;
-                            const costPrice = variant.product.avgCostPrice > 0 ? variant.product.avgCostPrice : variant.price * 0.95; // Fallback if avgCostPrice not set
+                            const costPrice = (variant.product.avgCostPrice > 0 && Number.isFinite(variant.product.avgCostPrice) && variant.product.avgCostPrice < 1e9)
+                                ? variant.product.avgCostPrice
+                                : variant.price * 0.95; // Fallback if avgCostPrice not set or corrupted
                             return {
                                 variantId: item.variantId,
                                 quantity: qty,

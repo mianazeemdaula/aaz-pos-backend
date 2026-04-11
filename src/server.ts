@@ -4,7 +4,7 @@ import { migrateDatabase } from "./prisma/migrate";
 import { prisma } from "./prisma/prisma";
 import { checkForUpdates } from "./utils/auto-updater";
 // https://o.fbr.gov.pk/newcu/tariff/ByDescriptionSearch.asp
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4001;
 
 async function checkDatabaseConnection(): Promise<void> {
   try {

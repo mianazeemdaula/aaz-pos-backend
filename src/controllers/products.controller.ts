@@ -445,7 +445,7 @@ async function processProduct(
                 safeVariants.push(v);
             }
         }
-
+        const lowestPrice = safeVariants.reduce((min, v) => v.price < min ? v.price : min, safeVariants[0]?.price ?? 0);
         await prisma.product.create({
             data: {
                 name: prod.name,
@@ -454,8 +454,8 @@ async function processProduct(
                 reorderLevel: prod.reorderLevel ?? 10,
                 allowNegative: prod.allowNegative ?? false,
                 imageUrl: prod.imageUrl ?? undefined,
-                avgCostPrice: prod.avgCost ?? 0,
-                totalStock: prod.stock ?? 0,
+                avgCostPrice: prod.avgCost > 0 ? prod.avgCost : (lowestPrice > 0 ? lowestPrice * 0.90 : 0),
+                totalStock: prod.stock > 0 ? prod.stock : 0,
                 variants: safeVariants.length ? { create: safeVariants } : undefined,
             },
         });

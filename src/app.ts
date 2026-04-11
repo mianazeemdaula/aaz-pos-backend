@@ -5,7 +5,24 @@ import apiRouter from "./routes";
 
 const app = express();
 
-app.use(cors());
+const allowedOrigins = [
+    "https://pos.txdevs.com",
+    "http://localhost:1420",
+    "http://localhost:4002",
+    "http://127.0.0.1:1420",
+    "http://127.0.0.1:4002",
+];
+
+app.use(
+    cors({
+        origin(origin, cb) {
+            // allow requests with no origin (curl, mobile apps, same-origin)
+            if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+            cb(new Error("Not allowed by CORS"));
+        },
+        credentials: true,
+    })
+);
 app.use(express.json());
 
 // Serve uploaded files

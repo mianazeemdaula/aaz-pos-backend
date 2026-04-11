@@ -137,10 +137,16 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                 const newTotalStock = product.totalStock + item.quantity;
                 // Only update avg cost for incoming goods (positive qty)
                 let newAvgCost = product.avgCostPrice;
-                if (!isReturnItem && newTotalStock > 0) {
-                    newAvgCost = (product.avgCostPrice * product.totalStock + item.unitCost * item.quantity) / newTotalStock;
-                } else if (!isReturnItem) {
-                    newAvgCost = item.unitCost;
+                if (!isReturnItem) {
+                    if (product.totalStock > 0 && newTotalStock > 0) {
+                        // Standard weighted average: only valid when base stock is positive
+                        newAvgCost = (product.avgCostPrice * product.totalStock + item.unitCost * item.quantity) / newTotalStock;
+                    } else {
+                        // Base stock is zero/negative (oversold), or result is still non-positive.
+                        // Applying the formula on a negative base compounds errors exponentially.
+                        // Reset avg cost to the new unit cost instead.
+                        newAvgCost = item.unitCost;
+                    }
                 }
 
                 await tx.product.update({

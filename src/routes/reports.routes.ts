@@ -12,6 +12,8 @@ import {
     getCustomerLedgerReportPDF,
     getSupplierLedgerReportPDF,
     getAccountStatementPDF,
+    getStockReportPDF,
+    getDailyReportPDF,
 } from "../controllers/reports.controller";
 
 const router = Router();
@@ -30,5 +32,7 @@ router.get("/supplier-statement/:supplierId", getSupplierStatementPDF);
 router.get("/customer-ledger/:customerId", getCustomerLedgerReportPDF);
 router.get("/supplier-ledger/:supplierId", getSupplierLedgerReportPDF);
 router.get("/account-statement/:accountId", getAccountStatementPDF);
+router.get("/stock", getStockReportPDF);
+router.get("/daily", getDailyReportPDF);
 
 export default router;
