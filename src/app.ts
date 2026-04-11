@@ -6,7 +6,7 @@ import apiRouter from "./routes";
 const app = express();
 
 const allowedOrigins = [
-    "https://pos.txdevs.com",
+    "https://pos.aazify.com",
     "http://localhost:1420",
     "http://localhost:4002",
     "http://127.0.0.1:1420",
