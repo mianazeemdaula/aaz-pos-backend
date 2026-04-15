@@ -45,13 +45,34 @@ export const getSupplier = async (req: Request, res: Response): Promise<void> =>
 };
 
 export const createSupplier = async (req: Request, res: Response): Promise<void> => {
-    const { name, phone, address, email, bankDetails, paymentTerms, taxId } = req.body;
+    const { name, phone, address, email, bankDetails, paymentTerms, taxId, openingBalance } = req.body;
     if (!name) { res.status(400).json({ error: "name is required" }); return; }
     try {
-        const supplier = await prisma.supplier.create({
-            data: { name, phone, address, email, bankDetails, paymentTerms, taxId },
-        });
-        res.status(201).json(supplier);
+        const ob = typeof openingBalance === 'number' && openingBalance !== 0 ? openingBalance : null;
+        if (ob !== null) {
+            const supplier = await prisma.$transaction(async (tx) => {
+                const s = await tx.supplier.create({
+                    data: { name, phone, address, email, bankDetails, paymentTerms, taxId, balance: ob },
+                });
+                await tx.supplierLedger.create({
+                    data: {
+                        supplierId: s.id,
+                        type: 'OPENING_BALANCE',
+                        debit: ob > 0 ? ob : 0,
+                        credit: ob < 0 ? Math.abs(ob) : 0,
+                        balance: ob,
+                        note: 'Opening balance',
+                    },
+                });
+                return s;
+            });
+            res.status(201).json(supplier);
+        } else {
+            const supplier = await prisma.supplier.create({
+                data: { name, phone, address, email, bankDetails, paymentTerms, taxId },
+            });
+            res.status(201).json(supplier);
+        }
     } catch {
         res.status(500).json({ error: "Failed to create supplier" });
     }

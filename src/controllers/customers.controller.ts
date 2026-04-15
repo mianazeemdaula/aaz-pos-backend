@@ -45,13 +45,34 @@ export const getCustomer = async (req: Request, res: Response): Promise<void> =>
 };
 
 export const createCustomer = async (req: Request, res: Response): Promise<void> => {
-    const { name, phone, address, email, creditLimit } = req.body;
+    const { name, phone, address, email, creditLimit, openingBalance } = req.body;
     if (!name) { res.status(400).json({ error: "name is required" }); return; }
     try {
-        const customer = await prisma.customer.create({
-            data: { name, phone, address, email, creditLimit },
-        });
-        res.status(201).json(customer);
+        const ob = typeof openingBalance === 'number' && openingBalance !== 0 ? openingBalance : null;
+        if (ob !== null) {
+            const customer = await prisma.$transaction(async (tx) => {
+                const c = await tx.customer.create({
+                    data: { name, phone, address, email, creditLimit, balance: ob },
+                });
+                await tx.customerLedger.create({
+                    data: {
+                        customerId: c.id,
+                        type: 'OPENING_BALANCE',
+                        debit: ob > 0 ? ob : 0,
+                        credit: ob < 0 ? Math.abs(ob) : 0,
+                        balance: ob,
+                        note: 'Opening balance',
+                    },
+                });
+                return c;
+            });
+            res.status(201).json(customer);
+        } else {
+            const customer = await prisma.customer.create({
+                data: { name, phone, address, email, creditLimit },
+            });
+            res.status(201).json(customer);
+        }
     } catch {
         res.status(500).json({ error: "Failed to create customer" });
     }
