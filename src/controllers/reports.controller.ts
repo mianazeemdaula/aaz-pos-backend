@@ -1352,6 +1352,16 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
             orderBy: { createdAt: "asc" },
         });
 
+        // Calculate opening balance: balance of the last entry BEFORE the date range
+        let openingBalance = 0;
+        if (from) {
+            const lastBefore = await prisma.customerLedger.findFirst({
+                where: { customerId, createdAt: { lt: new Date(from as string) } },
+                orderBy: { createdAt: "desc" },
+            });
+            openingBalance = lastBefore ? lastBefore.balance : 0;
+        }
+
         const debitTypes = ["SALE", "ADJUSTMENT_DR"];
 
         let totalDebit = 0;
@@ -1364,7 +1374,7 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
             totalCredit += credit;
             return { ...entry, debit, credit };
         });
-        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : customer.balance;
+        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : (from ? openingBalance : customer.balance);
 
         const reportFonts = fonts();
         const pdfGen = createPDFGenerator({
@@ -1417,15 +1427,17 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
         // Account summary
         doc.x = doc.page.margins.left;
         const acctTable = doc.table({
-            columnStyles: ["*", "*", "*"],
+            columnStyles: ["*", "*", "*", "*"],
             rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
         });
         acctTable.row([
+            { text: "Opening Balance", align: { x: "left", y: "center" } },
             { text: "Total Debit", align: { x: "left", y: "center" } },
             { text: "Total Credit", align: { x: "left", y: "center" } },
             { text: "Closing Balance", align: { x: "left", y: "center" } },
         ]);
         acctTable.row([
+            { text: fmtCurrency(openingBalance), align: { x: "left", y: "center" } },
             { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
             { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
             { text: fmtCurrency(closingBalance), align: { x: "left", y: "center" } },
@@ -1448,6 +1460,17 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
             { text: "Credit", align: { x: "right", y: "center" } },
             { text: "Balance", align: { x: "right", y: "center" } },
         ]);
+        // Opening balance row
+        if (from) {
+            table.row([
+                { text: fmtDate(from as string, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
+                { text: "OPENING BAL", align: { x: "center", y: "center" } },
+                { text: "Opening Balance", align: { x: "left", y: "center" } },
+                { text: "-", align: { x: "right", y: "center" } },
+                { text: "-", align: { x: "right", y: "center" } },
+                { text: fmtCurrency(openingBalance), align: { x: "right", y: "center" } },
+            ]);
+        }
         ledgerRows.forEach((row) => {
             table.row([
                 { text: fmtDate(row.createdAt, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
@@ -1499,6 +1522,16 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
             orderBy: { createdAt: "asc" },
         });
 
+        // Calculate opening balance: balance of the last entry BEFORE the date range
+        let openingBalance = 0;
+        if (from) {
+            const lastBefore = await prisma.supplierLedger.findFirst({
+                where: { supplierId, createdAt: { lt: new Date(from as string) } },
+                orderBy: { createdAt: "desc" },
+            });
+            openingBalance = lastBefore ? lastBefore.balance : 0;
+        }
+
         const debitTypes = ["PURCHASE", "ADJUSTMENT_DR"];
 
         let totalDebit = 0;
@@ -1511,7 +1544,7 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
             totalCredit += credit;
             return { ...entry, debit, credit };
         });
-        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : supplier.balance;
+        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : (from ? openingBalance : supplier.balance);
 
         const reportFonts = fonts();
         const pdfGen = createPDFGenerator({
@@ -1564,15 +1597,17 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
         // Account summary
         doc.x = doc.page.margins.left;
         const acctTable = doc.table({
-            columnStyles: ["*", "*", "*"],
+            columnStyles: ["*", "*", "*", "*"],
             rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
         });
         acctTable.row([
+            { text: "Opening Balance", align: { x: "left", y: "center" } },
             { text: "Total Debit", align: { x: "left", y: "center" } },
             { text: "Total Credit", align: { x: "left", y: "center" } },
             { text: "Closing Balance", align: { x: "left", y: "center" } },
         ]);
         acctTable.row([
+            { text: fmtCurrency(openingBalance), align: { x: "left", y: "center" } },
             { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
             { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
             { text: fmtCurrency(closingBalance), align: { x: "left", y: "center" } },
@@ -1595,9 +1630,20 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
             { text: "Credit", align: { x: "right", y: "center" } },
             { text: "Balance", align: { x: "right", y: "center" } },
         ]);
+        // Opening balance row
+        if (from) {
+            table.row([
+                { text: fmtDate(from as string, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
+                { text: "OPENING BAL", align: { x: "center", y: "center" } },
+                { text: "Opening Balance", align: { x: "left", y: "center" } },
+                { text: "-", align: { x: "right", y: "center" } },
+                { text: "-", align: { x: "right", y: "center" } },
+                { text: fmtCurrency(openingBalance), align: { x: "right", y: "center" } },
+            ]);
+        }
         ledgerRows.forEach((row) => {
             table.row([
-                { text: fmtDate(row.createdAt, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
+                { text: fmtDate(row.createdAt, "DD-MM-YYYY hh:mm:A"), align: { x: "center", y: "center" } },
                 { text: row.type.replace(/_/g, " "), align: { x: "center", y: "center" } },
                 { text: row.reference ?? row.note ?? "-", align: { x: "left", y: "center" } },
                 { text: row.debit ? fmtCurrency(row.debit) : "-", align: { x: "right", y: "center" } },

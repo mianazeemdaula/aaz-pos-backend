@@ -89,10 +89,17 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
         }
         const productMap = new Map(products.map((p) => [p.id, p]));
 
-        const totalAmount = items.reduce((sum: number, item: any) => {
+        // Apply variant factor to quantity: actual stock qty = qty * factor
+        const resolvedItems = items.map((item: any) => {
+            const factor = item.factor && item.factor > 0 ? item.factor : 1;
+            const effectiveQty = item.quantity * factor;
+            return { ...item, quantity: effectiveQty, originalQty: item.quantity, factor };
+        });
+
+        const totalAmount = resolvedItems.reduce((sum: number, item: any) => {
             const itemDiscount = item.discount ?? 0;
             const itemTax = item.taxAmount ?? 0;
-            return sum + (item.unitCost - itemDiscount) * item.quantity + itemTax;
+            return sum + (item.unitCost - itemDiscount) * item.originalQty + itemTax;
         }, 0) - discount + taxAmount + expenses;
 
 
@@ -108,14 +115,14 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                     totalAmount, paidAmount, discount, taxAmount, expenses,
                     date: purchaseDate,
                     items: {
-                        create: items.map((item: any) => ({
+                        create: resolvedItems.map((item: any) => ({
                             productId: item.productId,
                             quantity: item.quantity,
                             unitCost: item.unitCost,
                             sellingPrice: item.sellingPrice ?? 0,
                             discount: item.discount ?? 0,
                             taxAmount: item.taxAmount ?? 0,
-                            totalCost: ((item.unitCost - (item.discount ?? 0)) * item.quantity) + (item.taxAmount ?? 0),
+                            totalCost: ((item.unitCost - (item.discount ?? 0)) * item.originalQty) + (item.taxAmount ?? 0),
                         })),
                     },
                     payments: paymentEntries.length > 0 ? {
@@ -130,7 +137,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
             });
 
             // Update stock and weighted average cost for each product
-            for (const item of items) {
+            for (const item of resolvedItems) {
                 const product = productMap.get(item.productId)!;
                 const isReturnItem = item.quantity < 0;
 
@@ -173,15 +180,14 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                     if (supplier) {
                         const newBalance = supplier.balance + amountDue;
                         await tx.supplier.update({ where: { id: supplierId }, data: { balance: newBalance } });
-                        const isReturnTx = amountDue < 0; // negative = we are returning goods
                         await tx.supplierLedger.create({
                             data: {
                                 supplierId,
-                                type: isReturnTx ? "PURCHASE_RETURN" : "PURCHASE",
-                                amount: Math.abs(totalAmount),
+                                type: "PURCHASE",
+                                amount: Math.abs(amountDue),
                                 balance: newBalance,
                                 referenceId: purchase.id,
-                                reference: isReturnTx ? `PRTN-${purchase.id}` : `PO-${purchase.id}`,
+                                reference: `PO-${purchase.id}`,
                             },
                         });
                     }

@@ -32,6 +32,18 @@ model User {
   @@map("users")
 }
 
+model Setting {
+  id    Int    @id @default(autoincrement())
+  key   String @unique
+  value String
+  type  String // e.g., "string", "number", "boolean", "json"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
 enum UserRole {
   ADMIN
   MANAGER
@@ -236,10 +248,10 @@ model Brand {
 }
 
 model TaxSchdule {
-  id          Int     @id @default(autoincrement())
-  name        String  @unique @db.VarChar(100)
-  description String? @db.VarChar(100)
-  taxRate     Float // Tax rate as a percentage (e.g., 17.5 for 17.5%)
+  id     Int     @id @default(autoincrement())
+  name   String  @unique @db.VarChar(100)
+  hscode String? @db.VarChar(10)
+  rate   Float // Tax rate as a percentage (e.g., 17.5 for 17.5%)
 
   products Product[] // Products using this tax schedule
 

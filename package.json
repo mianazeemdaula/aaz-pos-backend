@@ -13,7 +13,8 @@
     "prod": "npm run build && npm run start",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prisma:generate": "prisma generate",
-    "prisma:seed": "ts-node-dev --respawn --transpile-only src/prisma/seed.ts"
+    "prisma:seed": "ts-node-dev --respawn --transpile-only src/prisma/seed.ts",
+    "prisma:seed:tax-schedules": "ts-node-dev --respawn --transpile-only src/prisma/seed-tax-schedules.ts"
   },
   "keywords": [],
   "author": "",

@@ -76,16 +76,30 @@ export const createPromotion = async (req: Request, res: Response): Promise<void
 
 export const updatePromotion = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, description, startDate, endDate, discountType, discountValue, conditionType, minPurchaseAmount, active } = req.body;
+    const { name, description, startDate, endDate, discountType, discountValue, conditionType, minPurchaseAmount, active, variantIds } = req.body;
     try {
-        const promotion = await prisma.promotion.update({
-            where: { id },
-            data: {
-                name, description, discountType, discountValue, conditionType,
-                minPurchaseAmount, active,
-                startDate: startDate ? new Date(startDate) : undefined,
-                endDate: endDate ? new Date(endDate) : undefined,
-            },
+        const promotion = await prisma.$transaction(async (tx) => {
+            const updated = await tx.promotion.update({
+                where: { id },
+                data: {
+                    name, description, discountType, discountValue, conditionType,
+                    minPurchaseAmount, active,
+                    startDate: startDate ? new Date(startDate) : undefined,
+                    endDate: endDate ? new Date(endDate) : undefined,
+                },
+            });
+            if (Array.isArray(variantIds)) {
+                await tx.promotionItems.deleteMany({ where: { promotionId: id } });
+                if (variantIds.length > 0) {
+                    await tx.promotionItems.createMany({
+                        data: variantIds.map((variantId: number) => ({ promotionId: id, variantId })),
+                    });
+                }
+            }
+            return tx.promotion.findUnique({
+                where: { id: updated.id },
+                include: { promotionItems: { include: { variant: { include: { product: true } } } } },
+            });
         });
         res.json(promotion);
     } catch {

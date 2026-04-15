@@ -4,25 +4,15 @@ import path from "path";
 import apiRouter from "./routes";
 
 const app = express();
+const corsOrigin = process.env.CORS_ORIGIN || "*";
+const listedOrigins = corsOrigin.split(",").map((origin) => origin.trim());
 
-const allowedOrigins = [
-    "https://pos.aazify.com",
-    "http://localhost:1420",
-    "http://localhost:4002",
-    "http://127.0.0.1:1420",
-    "http://127.0.0.1:4002",
-];
+// app.use((req, _res, next) => {
+// 	console.log("[request-origin]", req.headers.origin ?? "no-origin", req.method, req.originalUrl);
+// 	next();
+// });
 
-app.use(
-    cors({
-        origin(origin, cb) {
-            // allow requests with no origin (curl, mobile apps, same-origin)
-            if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-            cb(new Error("Not allowed by CORS"));
-        },
-        credentials: true,
-    })
-);
+app.use(cors({ origin: listedOrigins })); // Allow all origins for now; we can lock this down later if needed
 app.use(express.json());
 
 // Serve uploaded files

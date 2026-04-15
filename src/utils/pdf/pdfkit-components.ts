@@ -89,9 +89,9 @@ export function generateHeader(
 
     // ── COLUMN 2: Company Info ──
     let leftY = yPos;
-    const companyName = options.companyName || "Dubai Mart Sweets & Bakers";
-    const address = options.address || "Near Lari Ada, Depalpur";
-    const phone = options.phone || "0306-1073000";
+    const companyName = options.companyName || "ALI TRADERS";
+    const address = options.address || "Ghala Mandi Road, Depalpur";
+    const phone = options.phone || "0342-4818064";
 
     applyFont(doc, { family: "Helvetica-Bold", size: 13, color: "#1e293b" });
     doc.text(companyName.toLocaleUpperCase(), colX, leftY, { width: companyW - 5, align: "left" });

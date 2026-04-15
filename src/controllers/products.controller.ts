@@ -30,6 +30,7 @@ export const listProducts = async (req: Request, res: Response): Promise<void> =
                     brand: true,
                     category: true,
                     variants: true,
+                    taxSchdule: true,
                 },
             }),
             prisma.product.count({ where }),
@@ -49,6 +50,7 @@ export const getProduct = async (req: Request, res: Response): Promise<void> => 
                 brand: true,
                 category: true,
                 variants: true,
+                taxSchdule: true,
                 stockMovements: { orderBy: { createdAt: "desc" }, take: 20 },
             },
         });

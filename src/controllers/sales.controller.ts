@@ -106,12 +106,14 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
 
         const variantMap = new Map(variants.map((v) => [v.id, v]));
 
+        console.log(items);
         // Check stock availability (only for positive qty / regular sales)
         for (const item of items) {
             const qty = Number(item.qty);
             if (qty > 0) {
                 const variant = variantMap.get(item.variantId)!;
-                const newStock = variant.product.totalStock - qty * variant.factor;
+                const newStock = variant.product.totalStock - (qty * variant.factor);
+                console.log(newStock);
                 if (newStock < 0 && !variant.product.allowNegative) {
                     res.status(400).json({ error: `Insufficient stock : ${variant.product.name} [${variant.barcode}]` });
                     return;
@@ -210,7 +212,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                             data: {
                                 customerId,
                                 type: isReturnTx ? "SALE_RETURN" : "SALE",
-                                amount: Math.abs(totalAmount),
+                                amount: Math.abs(amountDue),
                                 balance: newBalance,
                                 referenceId: sale.id,
                                 reference: isReturnTx ? `RTN-${sale.id}` : `INV-${sale.id}`,
