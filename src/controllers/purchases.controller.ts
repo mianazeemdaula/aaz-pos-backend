@@ -102,6 +102,12 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
             return sum + (item.unitCost - itemDiscount) * item.originalQty + itemTax;
         }, 0) - discount + taxAmount + expenses;
 
+        // if amount not paid means there must be a supplier
+        if (totalAmount != paidAmount && !supplierId) {
+            res.status(400).json({ error: 'Supplier must be selected if amount not fully paid' });
+            return;
+        }
+
 
         const purchaseDate = date ? new Date(date) : new Date();
 
@@ -122,7 +128,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                             sellingPrice: item.sellingPrice ?? 0,
                             discount: item.discount ?? 0,
                             taxAmount: item.taxAmount ?? 0,
-                            totalCost: ((item.unitCost / item.factor - (item.discount ?? 0)) * item.originalQty) + (item.taxAmount ?? 0),
+                            totalCost: ((item.unitCost - (item.discount ?? 0)) * item.originalQty) + (item.taxAmount ?? 0),
                         })),
                     },
                     payments: paymentEntries.length > 0 ? {
@@ -141,17 +147,15 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                 const product = productMap.get(item.productId)!;
                 const isReturnItem = item.quantity < 0;
 
-                const newTotalStock = product.totalStock + (item.quantity * (item.factor ?? 1));
+                const newTotalStock = product.totalStock + item.quantity;
                 // Only update avg cost for incoming goods (positive qty)
                 let newAvgCost = product.avgCostPrice;
                 if (!isReturnItem) {
                     if (product.totalStock > 0 && newTotalStock > 0) {
                         // Standard weighted average: only valid when base stock is positive
-                        newAvgCost = (product.avgCostPrice * product.totalStock + (item.unitCost / item.factor) * (item.quantity * (item.factor ?? 1))) / newTotalStock;
+                        newAvgCost = (product.avgCostPrice * product.totalStock + (item.unitCost / item.factor) * item.quantity) / newTotalStock;
                     } else {
                         // Base stock is zero/negative (oversold), or result is still non-positive.
-                        // Applying the formula on a negative base compounds errors exponentially.
-                        // Reset avg cost to the new unit cost instead.
                         newAvgCost = item.unitCost / item.factor;
                     }
                 }
@@ -165,7 +169,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                     data: {
                         productId: product.id,
                         type: isReturnItem ? "PURCHASE_RETURN" : "PURCHASE",
-                        quantity: item.quantity * (item.factor ?? 1),
+                        quantity: item.quantity,
                         reference: isReturnItem ? `PRTN-${purchase.id}` : `PO-${purchase.id}`,
                         referenceId: purchase.id,
                     },
