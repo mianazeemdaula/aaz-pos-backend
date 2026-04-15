@@ -118,11 +118,11 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                         create: resolvedItems.map((item: any) => ({
                             productId: item.productId,
                             quantity: item.quantity,
-                            unitCost: item.unitCost,
+                            unitCost: item.unitCost / item.factor,
                             sellingPrice: item.sellingPrice ?? 0,
                             discount: item.discount ?? 0,
                             taxAmount: item.taxAmount ?? 0,
-                            totalCost: ((item.unitCost - (item.discount ?? 0)) * item.originalQty) + (item.taxAmount ?? 0),
+                            totalCost: ((item.unitCost / item.factor - (item.discount ?? 0)) * item.originalQty) + (item.taxAmount ?? 0),
                         })),
                     },
                     payments: paymentEntries.length > 0 ? {
@@ -147,12 +147,12 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                 if (!isReturnItem) {
                     if (product.totalStock > 0 && newTotalStock > 0) {
                         // Standard weighted average: only valid when base stock is positive
-                        newAvgCost = (product.avgCostPrice * product.totalStock + item.unitCost * item.quantity) / newTotalStock;
+                        newAvgCost = (product.avgCostPrice * product.totalStock + (item.unitCost / item.factor) * item.quantity) / newTotalStock;
                     } else {
                         // Base stock is zero/negative (oversold), or result is still non-positive.
                         // Applying the formula on a negative base compounds errors exponentially.
                         // Reset avg cost to the new unit cost instead.
-                        newAvgCost = item.unitCost;
+                        newAvgCost = item.unitCost / item.factor;
                     }
                 }
 
@@ -185,6 +185,8 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                                 supplierId,
                                 type: "PURCHASE",
                                 amount: Math.abs(amountDue),
+                                debit: Math.abs(amountDue),
+                                credit: 0,
                                 balance: newBalance,
                                 referenceId: purchase.id,
                                 reference: `PO-${purchase.id}`,

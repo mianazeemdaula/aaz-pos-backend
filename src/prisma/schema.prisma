@@ -112,7 +112,9 @@ model CustomerLedger {
   id          Int                @id @default(autoincrement())
   customerId  Int
   type        CustomerLedgerType
-  amount      Float // Always positive; direction determined by type
+  amount      Float              @default(0) // Legacy — kept for backward compat
+  debit       Float              @default(0) // Positive value when customer owes more
+  credit      Float              @default(0) // Positive value when customer owes less
   balance     Float // Running balance snapshot AFTER this entry
   referenceId Int? // FK to Sale / SaleReturn / CustomerPayment id
   reference   String? // Human-readable e.g. "INV-0042", "PMT-0010"
@@ -182,7 +184,9 @@ model SupplierLedger {
   id          Int                @id @default(autoincrement())
   supplierId  Int
   type        SupplierLedgerType
-  amount      Float // Always positive; direction determined by type
+  amount      Float              @default(0) // Legacy — kept for backward compat
+  debit       Float              @default(0) // Positive value when we owe supplier more
+  credit      Float              @default(0) // Positive value when we owe supplier less
   balance     Float // Running balance snapshot AFTER this entry
   referenceId Int? // FK to Purchase / PurchaseReturn / SupplierPayment id
   reference   String? // Human-readable e.g. "PO-0011", "PMT-0007"

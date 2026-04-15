@@ -103,9 +103,9 @@ export const listSupplierLedger = async (req: Request, res: Response): Promise<v
 
 export const createSupplierLedgerEntry = async (req: Request, res: Response): Promise<void> => {
     const supplierId = parseInt(req.params.id);
-    const { type, amount, note, reference, referenceId } = req.body;
+    const { type, amount, debit, credit, note, reference, referenceId } = req.body;
     const VALID_TYPES = ["PURCHASE", "PAYMENT", "PURCHASE_RETURN", "ADJUSTMENT_DR", "ADJUSTMENT_CR", "OPENING_BALANCE"];
-    if (!type || !amount) { res.status(400).json({ error: "type and amount are required" }); return; }
+    if (!type || (!amount && !debit && !credit)) { res.status(400).json({ error: "type and amount (or debit/credit) are required" }); return; }
     if (!VALID_TYPES.includes(type)) {
         res.status(400).json({ error: `type must be one of: ${VALID_TYPES.join(", ")}` });
         return;
@@ -115,12 +115,16 @@ export const createSupplierLedgerEntry = async (req: Request, res: Response): Pr
         if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
 
         const CREDIT_TYPES = ["PAYMENT", "PURCHASE_RETURN", "ADJUSTMENT_CR"];
-        const delta = CREDIT_TYPES.includes(type) ? -Math.abs(amount) : Math.abs(amount);
+        const isCredit = CREDIT_TYPES.includes(type);
+        const absAmount = Math.abs(amount || debit || credit || 0);
+        const entryDebit = debit ? Math.abs(debit) : (isCredit ? 0 : absAmount);
+        const entryCredit = credit ? Math.abs(credit) : (isCredit ? absAmount : 0);
+        const delta = entryDebit - entryCredit;
         const newBalance = supplier.balance + delta;
 
         const [entry] = await prisma.$transaction([
             prisma.supplierLedger.create({
-                data: { supplierId, type, amount: Math.abs(amount), balance: newBalance, note, reference, referenceId },
+                data: { supplierId, type, amount: absAmount, debit: entryDebit, credit: entryCredit, balance: newBalance, note, reference, referenceId },
             }),
             prisma.supplier.update({ where: { id: supplierId }, data: { balance: newBalance } }),
         ]);
@@ -173,7 +177,7 @@ export const createSupplierPayment = async (req: Request, res: Response): Promis
             prisma.supplierLedger.create({
                 data: {
                     supplierId, type: "PAYMENT",
-                    amount: Math.abs(amount), balance: newBalance,
+                    amount: Math.abs(amount), debit: 0, credit: Math.abs(amount), balance: newBalance,
                     note, reference: `PMT-${Date.now()}`,
                 },
             }),

@@ -227,7 +227,7 @@ export const getVariantByBarcode = async (req: Request, res: Response): Promise<
     try {
         const variant = await prisma.productVariant.findUnique({
             where: { barcode },
-            include: { product: { include: { category: true, brand: true } } },
+            include: { product: { include: { category: true, brand: true, variants: true } } },
         });
         if (!variant) { res.status(404).json({ error: "Variant not found" }); return; }
         res.json(variant);

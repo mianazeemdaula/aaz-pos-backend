@@ -106,20 +106,19 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
 
         const variantMap = new Map(variants.map((v) => [v.id, v]));
 
-        console.log(items);
         // Check stock availability (only for positive qty / regular sales)
-        for (const item of items) {
-            const qty = Number(item.qty);
-            if (qty > 0) {
-                const variant = variantMap.get(item.variantId)!;
-                const newStock = variant.product.totalStock - (qty * variant.factor);
-                console.log(newStock);
-                if (newStock < 0 && !variant.product.allowNegative) {
-                    res.status(400).json({ error: `Insufficient stock : ${variant.product.name} [${variant.barcode}]` });
-                    return;
-                }
-            }
-        }
+        // for (const item of items) {
+        //     const qty = Number(item.qty);
+        //     if (qty > 0) {
+        //         const variant = variantMap.get(item.variantId)!;
+        //         const newStock = variant.product.totalStock - (qty * variant.factor);
+        //         console.log(newStock);
+        //         if (newStock < 0 && !variant.product.allowNegative) {
+        //             res.status(400).json({ error: `Insufficient stock : ${variant.product.name} [${variant.barcode}]` });
+        //             return;
+        //         }
+        //     }
+        // }
 
         // Compute totals
         const totalAmount = items.reduce((sum: number, item: any) => {
@@ -158,7 +157,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                                 unitPrice,
                                 discount: itemDiscount,
                                 totalPrice: (unitPrice - itemDiscount) * qty,
-                                avgCostPrice: costPrice,
+                                avgCostPrice: costPrice * variant.factor, // Store avg cost at the variant level (cost price * factor)
                             };
                         }),
                     },
@@ -213,6 +212,8 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                                 customerId,
                                 type: isReturnTx ? "SALE_RETURN" : "SALE",
                                 amount: Math.abs(amountDue),
+                                debit: isReturnTx ? 0 : Math.abs(amountDue),
+                                credit: isReturnTx ? Math.abs(amountDue) : 0,
                                 balance: newBalance,
                                 referenceId: sale.id,
                                 reference: isReturnTx ? `RTN-${sale.id}` : `INV-${sale.id}`,
@@ -228,6 +229,24 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
     } catch (err) {
         console.error("Error creating sale:", err);
         res.status(500).json({ error: "Failed to create sale" });
+    }
+};
+
+export const updateSaleTaxInvoice = async (req: Request, res: Response): Promise<void> => {
+    const id = parseInt(req.params.id);
+    const { taxInvoiceId } = req.body;
+    if (!taxInvoiceId || typeof taxInvoiceId !== 'string') {
+        res.status(400).json({ error: "taxInvoiceId is required" });
+        return;
+    }
+    try {
+        const sale = await prisma.sale.update({
+            where: { id },
+            data: { taxInvoiceId },
+        });
+        res.json(sale);
+    } catch {
+        res.status(500).json({ error: "Failed to update tax invoice ID" });
     }
 };
 

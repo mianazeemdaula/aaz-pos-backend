@@ -1367,9 +1367,8 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
         let totalDebit = 0;
         let totalCredit = 0;
         const ledgerRows = entries.map((entry) => {
-            const isDebit = debitTypes.includes(entry.type);
-            const debit = isDebit ? entry.amount : 0;
-            const credit = !isDebit ? entry.amount : 0;
+            const debit = entry.debit || (debitTypes.includes(entry.type) ? entry.amount : 0);
+            const credit = entry.credit || (!debitTypes.includes(entry.type) ? entry.amount : 0);
             totalDebit += debit;
             totalCredit += credit;
             return { ...entry, debit, credit };
@@ -1537,9 +1536,8 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
         let totalDebit = 0;
         let totalCredit = 0;
         const ledgerRows = entries.map((entry) => {
-            const isDebit = debitTypes.includes(entry.type);
-            const debit = isDebit ? entry.amount : 0;
-            const credit = !isDebit ? entry.amount : 0;
+            const debit = entry.debit || (debitTypes.includes(entry.type) ? entry.amount : 0);
+            const credit = entry.credit || (!debitTypes.includes(entry.type) ? entry.amount : 0);
             totalDebit += debit;
             totalCredit += credit;
             return { ...entry, debit, credit };
