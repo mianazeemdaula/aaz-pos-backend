@@ -184,6 +184,8 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                     if (supplier) {
                         const newBalance = supplier.balance + amountDue;
                         await tx.supplier.update({ where: { id: supplierId }, data: { balance: newBalance } });
+                        const message = amountDue < 0 ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
+                            : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Purchase Order # ${purchase.id}`;
                         await tx.supplierLedger.create({
                             data: {
                                 supplierId,
@@ -193,7 +195,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                                 credit: 0,
                                 balance: newBalance,
                                 referenceId: purchase.id,
-                                reference: `PO-${purchase.id}`,
+                                reference: message,
                             },
                         });
                     }

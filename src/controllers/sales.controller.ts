@@ -207,6 +207,8 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                         const newBalance = customer.balance + amountDue;
                         await tx.customer.update({ where: { id: customerId }, data: { balance: newBalance } });
                         const isReturnTx = amountDue < 0; // negative amountDue = customer gets credit
+                        const message = isReturnTx ? `Customer returned items worth Rs ${Math.abs(amountDue)}`
+                            : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Invoice # ${sale.id}`;
                         await tx.customerLedger.create({
                             data: {
                                 customerId,
@@ -216,7 +218,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                                 credit: isReturnTx ? Math.abs(amountDue) : 0,
                                 balance: newBalance,
                                 referenceId: sale.id,
-                                reference: isReturnTx ? `RTN-${sale.id}` : `INV-${sale.id}`,
+                                reference: message,
                             },
                         });
                     }
