@@ -37,6 +37,133 @@ export const updateSettings = (req: Request, res: Response): void => {
     res.json(updated);
 };
 
+// ─── App Settings (DB-stored key/value) ──────────────────────────────────────
+
+export const getAppSettings = async (_req: Request, res: Response): Promise<void> => {
+    try {
+        const settings = await prisma.setting.findMany();
+        const map: Record<string, unknown> = {};
+        for (const s of settings) {
+            if (s.type === "boolean") map[s.key] = s.value === "true";
+            else if (s.type === "number") map[s.key] = Number(s.value);
+            else if (s.type === "json") { try { map[s.key] = JSON.parse(s.value); } catch { map[s.key] = s.value; } }
+            else map[s.key] = s.value;
+        }
+        res.json(map);
+    } catch {
+        res.status(500).json({ error: "Failed to fetch app settings" });
+    }
+};
+
+export const updateAppSettings = async (req: Request, res: Response): Promise<void> => {
+    const entries = req.body as Record<string, unknown>;
+    if (!entries || typeof entries !== "object") {
+        res.status(400).json({ error: "Body must be an object of key-value pairs" });
+        return;
+    }
+    try {
+        for (const [key, value] of Object.entries(entries)) {
+            const strValue = String(value);
+            const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "string";
+            await prisma.setting.upsert({
+                where: { key },
+                create: { key, value: strValue, type },
+                update: { value: strValue, type },
+            });
+        }
+        // Return all settings after update
+        const settings = await prisma.setting.findMany();
+        const map: Record<string, unknown> = {};
+        for (const s of settings) {
+            if (s.type === "boolean") map[s.key] = s.value === "true";
+            else if (s.type === "number") map[s.key] = Number(s.value);
+            else map[s.key] = s.value;
+        }
+        res.json(map);
+    } catch {
+        res.status(500).json({ error: "Failed to update app settings" });
+    }
+};
+
+// ─── Per-User Settings ───────────────────────────────────────────────────────
+
+export const getUserSettings = async (req: Request, res: Response): Promise<void> => {
+    const userId = parseInt(req.params.userId);
+    if (isNaN(userId)) { res.status(400).json({ error: "Invalid user ID" }); return; }
+    try {
+        const prefix = `user.${userId}.`;
+        const settings = await prisma.setting.findMany({ where: { key: { startsWith: prefix } } });
+        const map: Record<string, unknown> = {};
+        for (const s of settings) {
+            const shortKey = s.key.replace(prefix, "");
+            if (s.type === "boolean") map[shortKey] = s.value === "true";
+            else if (s.type === "number") map[shortKey] = Number(s.value);
+            else map[shortKey] = s.value;
+        }
+        res.json(map);
+    } catch {
+        res.status(500).json({ error: "Failed to fetch user settings" });
+    }
+};
+
+export const updateUserSettings = async (req: Request, res: Response): Promise<void> => {
+    const userId = parseInt(req.params.userId);
+    if (isNaN(userId)) { res.status(400).json({ error: "Invalid user ID" }); return; }
+    const entries = req.body as Record<string, unknown>;
+    if (!entries || typeof entries !== "object") {
+        res.status(400).json({ error: "Body must be an object of key-value pairs" });
+        return;
+    }
+    try {
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+        if (!user) { res.status(404).json({ error: "User not found" }); return; }
+        const prefix = `user.${userId}.`;
+        for (const [key, value] of Object.entries(entries)) {
+            const fullKey = `${prefix}${key}`;
+            const strValue = String(value);
+            const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "string";
+            await prisma.setting.upsert({
+                where: { key: fullKey },
+                create: { key: fullKey, value: strValue, type },
+                update: { value: strValue, type },
+            });
+        }
+        // Return updated user settings
+        const settings = await prisma.setting.findMany({ where: { key: { startsWith: prefix } } });
+        const map: Record<string, unknown> = {};
+        for (const s of settings) {
+            const shortKey = s.key.replace(prefix, "");
+            if (s.type === "boolean") map[shortKey] = s.value === "true";
+            else map[shortKey] = s.value;
+        }
+        res.json(map);
+    } catch {
+        res.status(500).json({ error: "Failed to update user settings" });
+    }
+};
+
+// ─── All Users Settings (bulk) ───────────────────────────────────────────────
+
+export const getAllUsersSettings = async (_req: Request, res: Response): Promise<void> => {
+    try {
+        const settings = await prisma.setting.findMany({ where: { key: { startsWith: "user." } } });
+        const result: Record<number, Record<string, unknown>> = {};
+        for (const s of settings) {
+            const match = s.key.match(/^user\.(\d+)\.(.+)$/);
+            if (!match) continue;
+            const uid = parseInt(match[1]);
+            const shortKey = match[2];
+            if (!result[uid]) result[uid] = {};
+            if (s.type === "boolean") result[uid][shortKey] = s.value === "true";
+            else if (s.type === "number") result[uid][shortKey] = Number(s.value);
+            else result[uid][shortKey] = s.value;
+        }
+        res.json(result);
+    } catch {
+        res.status(500).json({ error: "Failed to fetch users settings" });
+    }
+};
+
 // ─── Backup ──────────────────────────────────────────────────────────────────
 
 export const backupDatabase = async (_req: Request, res: Response): Promise<void> => {
