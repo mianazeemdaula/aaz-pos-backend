@@ -22,12 +22,13 @@ model User {
   lastLogin DateTime?
 
   // Relations
-  sales         Sale[]
-  purchases     Purchase[]
-  heldSales     HeldSale[]
-  heldPurchases HeldPurchase[]
-  expenses      Expense[]
-  employee      Employee? // One-to-one: a User may also be an Employee
+  sales           Sale[]
+  purchases       Purchase[]
+  heldSales       HeldSale[]
+  heldPurchases   HeldPurchase[]
+  expenses        Expense[]
+  employee        Employee? // One-to-one: a User may also be an Employee
+  userPermissions UserPermission[]
 
   @@map("users")
 }
@@ -50,6 +51,20 @@ enum UserRole {
   CASHIER
   DELIVERY_BOY
   WORKER
+}
+
+model UserPermission {
+  id        Int     @id @default(autoincrement())
+  userId    Int
+  module    String // e.g., "sales", "purchases", "inventory"
+  canView   Boolean @default(false)
+  canEdit   Boolean @default(false)
+  canDelete Boolean @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, module])
+  @@map("user_permissions")
 }
 
 // ==== CHART OF ACCOUNTS ====

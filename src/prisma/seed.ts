@@ -31,6 +31,11 @@ export async function seedDatabase() {
         ],
     });
 
+    await prisma.setting.createMany({
+        data: [
+        ],
+    });
+
     // await prisma.category.createMany({
     //     data: [
     //         { name: "Beverages" },
