@@ -5,6 +5,7 @@ import QRCode from "qrcode";
 import { prisma } from "../prisma/prisma";
 import { createPDFGenerator, getReportFontTheme } from "../utils/pdf";
 import { generateSignatureSection } from "../utils/pdf/pdfkit-components";
+import { readSettings } from "./settings.controller";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ function pdfConfig(
     qrCodeBuffer?: Buffer
 ) {
     const reportFonts = fonts();
+    const company = readSettings();
     return {
         fontRegistrations: reportFonts.registrations,
         fontFamilyMap: reportFonts.aliasMap,
@@ -57,6 +59,9 @@ function pdfConfig(
             title,
             subtitle,
             logo: { path: logoPath, width: 55, height: 55 },
+            companyName: (company.businessName as string) || undefined,
+            address: (company.address as string) || undefined,
+            phone: (company.phone as string) || undefined,
             showDate: true,
             titleFont: { family: "Helvetica-Bold" as const, size: 14, color: "#1e40af" },
             subtitleFont: { size: 9, color: "#475569" },
@@ -65,7 +70,7 @@ function pdfConfig(
             qrCodeSize: 55,
         },
         footer: {
-            leftText: "POS System",
+            leftText: (company.businessName as string) || "POS System",
             centerText: title,
             showPageNumber: true,
             font: { size: 8, color: "#666666" },

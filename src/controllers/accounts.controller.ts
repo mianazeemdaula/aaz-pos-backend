@@ -7,7 +7,7 @@ const VALID_TYPES = ["ASSET", "LIABILITY", "EQUITY", "INCOME", "EXPENSE"];
 async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, number>> {
     if (accountIds.length === 0) return new Map();
 
-    const [sp, cp, pp, ex, sup, sal, ea] = await Promise.all([
+    const [sp, cp, pp, ex, sup, sal, ea, trFrom, trTo] = await Promise.all([
         prisma.salePayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.customerPayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.purchasePayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
@@ -15,6 +15,8 @@ async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, 
         prisma.supplierPayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.salarySlip.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds }, status: "PAID" }, _sum: { netPayable: true } }),
         prisma.employeeAdvance.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
+        prisma.accountTransfer.groupBy({ by: ["fromAccountId"], where: { fromAccountId: { in: accountIds } }, _sum: { amount: true } }),
+        prisma.accountTransfer.groupBy({ by: ["toAccountId"], where: { toAccountId: { in: accountIds } }, _sum: { amount: true } }),
     ]);
 
     const balances = new Map<number, number>(accountIds.map(id => [id, 0]));
@@ -26,6 +28,9 @@ async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, 
     for (const row of sup) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.amount ?? 0));
     for (const row of sal) if (row.accountId != null) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.netPayable ?? 0));
     for (const row of ea) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.amount ?? 0));
+    // Account transfers: subtract from source, add to destination
+    for (const row of trFrom) balances.set(row.fromAccountId, (balances.get(row.fromAccountId) ?? 0) - (row._sum.amount ?? 0));
+    for (const row of trTo) balances.set(row.toAccountId, (balances.get(row.toAccountId) ?? 0) + (row._sum.amount ?? 0));
 
     return balances;
 }
@@ -113,5 +118,67 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
         res.json({ message: "Account deleted" });
     } catch {
         res.status(500).json({ error: "Failed to delete account — it may be in use" });
+    }
+};
+
+// ---- ACCOUNT TRANSFERS ----
+
+export const transferBetweenAccounts = async (req: Request, res: Response): Promise<void> => {
+    const { fromAccountId, toAccountId, amount, note } = req.body;
+    if (!fromAccountId || !toAccountId || !amount) {
+        res.status(400).json({ error: "fromAccountId, toAccountId and amount are required" });
+        return;
+    }
+    if (fromAccountId === toAccountId) {
+        res.status(400).json({ error: "Source and destination accounts must be different" });
+        return;
+    }
+    if (amount <= 0) {
+        res.status(400).json({ error: "Amount must be positive" });
+        return;
+    }
+    try {
+        const [from, to] = await Promise.all([
+            prisma.account.findUnique({ where: { id: fromAccountId } }),
+            prisma.account.findUnique({ where: { id: toAccountId } }),
+        ]);
+        if (!from) { res.status(404).json({ error: "Source account not found" }); return; }
+        if (!to) { res.status(404).json({ error: "Destination account not found" }); return; }
+
+        const transfer = await prisma.accountTransfer.create({
+            data: { fromAccountId, toAccountId, amount, note },
+            include: {
+                fromAccount: { select: { id: true, name: true, code: true } },
+                toAccount: { select: { id: true, name: true, code: true } },
+            },
+        });
+        res.status(201).json(transfer);
+    } catch {
+        res.status(500).json({ error: "Failed to create transfer" });
+    }
+};
+
+export const listTransfers = async (req: Request, res: Response): Promise<void> => {
+    const { page, pageSize, skip } = getPaginationParams(req);
+    const where: any = {};
+    if (req.query.accountId) {
+        const accountId = parseInt(req.query.accountId as string);
+        where.OR = [{ fromAccountId: accountId }, { toAccountId: accountId }];
+    }
+    try {
+        const [transfers, total] = await Promise.all([
+            prisma.accountTransfer.findMany({
+                where, skip, take: pageSize,
+                orderBy: { createdAt: "desc" },
+                include: {
+                    fromAccount: { select: { id: true, name: true, code: true } },
+                    toAccount: { select: { id: true, name: true, code: true } },
+                },
+            }),
+            prisma.accountTransfer.count({ where }),
+        ]);
+        res.json(createPaginatedResponse(transfers, total, page, pageSize));
+    } catch {
+        res.status(500).json({ error: "Failed to fetch transfers" });
     }
 };

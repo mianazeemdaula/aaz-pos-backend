@@ -217,7 +217,7 @@ export const approveAdvance = async (req: Request, res: Response): Promise<void>
         // Approve just confirms the advance — no balance change (balance was already changed on create)
         const updated = await prisma.employeeAdvance.update({
             where: { id: advanceId },
-            data: { status: "PENDING" }, // stays PENDING until salary deduction, but we could add APPROVED status
+            data: { status: "APPROVED" },
             include: { account: true },
         });
         res.json(updated);
@@ -231,7 +231,7 @@ export const rejectAdvance = async (req: Request, res: Response): Promise<void> 
     try {
         const advance = await prisma.employeeAdvance.findUnique({ where: { id: advanceId } });
         if (!advance) { res.status(404).json({ error: "Advance not found" }); return; }
-        if (advance.status !== "PENDING") {
+        if (advance.status !== "PENDING" && advance.status !== "APPROVED") {
             res.status(400).json({ error: `Cannot reject advance with status ${advance.status}` });
             return;
         }
@@ -274,11 +274,10 @@ export const repayAdvance = async (req: Request, res: Response): Promise<void> =
     try {
         const advance = await prisma.employeeAdvance.findUnique({ where: { id: advanceId } });
         if (!advance) { res.status(404).json({ error: "Advance not found" }); return; }
-        if (advance.status !== "PENDING") {
+        if (advance.status !== "PENDING" && advance.status !== "APPROVED") {
             res.status(400).json({ error: `Cannot repay advance with status ${advance.status}` });
             return;
         }
-
         const employee = await prisma.employee.findUnique({ where: { id: advance.employeeId } });
         if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
 
@@ -314,11 +313,10 @@ export const waiveAdvance = async (req: Request, res: Response): Promise<void> =
     try {
         const advance = await prisma.employeeAdvance.findUnique({ where: { id: advanceId } });
         if (!advance) { res.status(404).json({ error: "Advance not found" }); return; }
-        if (advance.status !== "PENDING") {
+        if (advance.status !== "PENDING" && advance.status !== "APPROVED") {
             res.status(400).json({ error: `Cannot waive advance with status ${advance.status}` });
             return;
         }
-
         const employee = await prisma.employee.findUnique({ where: { id: advance.employeeId } });
         if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
 

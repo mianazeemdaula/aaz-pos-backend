@@ -86,8 +86,25 @@ model Account {
   employeeAdvances  EmployeeAdvance[]
   salePayments      SalePayment[]
   purchasePayments  PurchasePayment[]
+  transfersFrom     AccountTransfer[]  @relation("TransfersFrom")
+  transfersTo       AccountTransfer[]  @relation("TransfersTo")
 
   @@map("accounts")
+}
+
+// ==== ACCOUNT TRANSFERS ====
+model AccountTransfer {
+  id            Int      @id @default(autoincrement())
+  fromAccountId Int      @map("from_account_id")
+  toAccountId   Int      @map("to_account_id")
+  amount        Float
+  note          String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  fromAccount Account @relation("TransfersFrom", fields: [fromAccountId], references: [id])
+  toAccount   Account @relation("TransfersTo", fields: [toAccountId], references: [id])
+
+  @@map("account_transfers")
 }
 
 enum AccountType {
@@ -615,7 +632,8 @@ model EmployeeAdvance {
 }
 
 enum AdvanceStatus {
-  PENDING // Given but not yet deducted from salary
+  PENDING // Given but not yet approved
+  APPROVED // Approved by management, awaiting salary deduction
   DEDUCTED // Deducted in a SalarySlip
   REPAID // Repaid directly by employee (cash)
   WAIVED // Waived off by management

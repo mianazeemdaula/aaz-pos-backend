@@ -67,9 +67,9 @@ export const generateSalarySlip = async (req: Request, res: Response): Promise<v
             return;
         }
 
-        // Get all PENDING advances for this employee for the given month/year
+        // Get all PENDING or APPROVED advances for this employee for the given month/year
         const pendingAdvances = await prisma.employeeAdvance.findMany({
-            where: { employeeId, status: "PENDING", month, year },
+            where: { employeeId, status: { in: ["PENDING", "APPROVED"] }, month, year },
         });
         const totalAdvances = pendingAdvances.reduce((sum, a) => sum + a.amount, 0);
         const netPayable = employee.baseSalary + bonus - totalAdvances - otherDeductions;

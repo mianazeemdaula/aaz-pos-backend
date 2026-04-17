@@ -2,28 +2,65 @@ import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
-const SETTINGS_FILE = path.join(process.cwd(), "settings.json");
+const SETTINGS_FILE = path.join(process.cwd(), "settings.dat");
+const SETTINGS_FILE_LEGACY = path.join(process.cwd(), "settings.json");
 
-function readSettings(): Record<string, unknown> {
+// AES-256-GCM encryption for company info at rest
+const ENC_ALGORITHM = "aes-256-gcm";
+const ENC_KEY = crypto.scryptSync("aaz-pos-company-settings-key", "aaz-salt-2024", 32);
+
+function encryptData(data: string): string {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv(ENC_ALGORITHM, ENC_KEY, iv);
+    let encrypted = cipher.update(data, "utf8", "hex");
+    encrypted += cipher.final("hex");
+    const tag = cipher.getAuthTag().toString("hex");
+    return iv.toString("hex") + ":" + tag + ":" + encrypted;
+}
+
+function decryptData(encrypted: string): string {
+    const [ivHex, tagHex, data] = encrypted.split(":");
+    const iv = Buffer.from(ivHex, "hex");
+    const tag = Buffer.from(tagHex, "hex");
+    const decipher = crypto.createDecipheriv(ENC_ALGORITHM, ENC_KEY, iv);
+    decipher.setAuthTag(tag);
+    let decrypted = decipher.update(data, "hex", "utf8");
+    decrypted += decipher.final("utf8");
+    return decrypted;
+}
+
+const DEFAULT_SETTINGS: Record<string, unknown> = {
+    businessName: "AAZ Point of Sale",
+    address: "",
+    phone: "",
+    ntn: "",
+    strn: "",
+    currency: "PKR",
+    defaultTaxRate: 0,
+};
+
+export function readSettings(): Record<string, unknown> {
     try {
+        // Read encrypted settings
         if (fs.existsSync(SETTINGS_FILE)) {
-            return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8"));
+            const raw = fs.readFileSync(SETTINGS_FILE, "utf-8");
+            return JSON.parse(decryptData(raw));
+        }
+        // Migrate from legacy plain-text settings.json
+        if (fs.existsSync(SETTINGS_FILE_LEGACY)) {
+            const data = JSON.parse(fs.readFileSync(SETTINGS_FILE_LEGACY, "utf-8"));
+            writeSettings(data);
+            fs.unlinkSync(SETTINGS_FILE_LEGACY);
+            return data;
         }
     } catch { /* fallback */ }
-    return {
-        businessName: "AAZ Point of Sale",
-        address: "",
-        phone: "",
-        ntn: "",
-        strn: "",
-        currency: "PKR",
-        defaultTaxRate: 0,
-    };
+    return { ...DEFAULT_SETTINGS };
 }
 
 function writeSettings(data: Record<string, unknown>) {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2), "utf-8");
+    fs.writeFileSync(SETTINGS_FILE, encryptData(JSON.stringify(data)), "utf-8");
 }
 
 export const getSettings = (_req: Request, res: Response): void => {
@@ -41,7 +78,9 @@ export const updateSettings = (req: Request, res: Response): void => {
 
 export const getAppSettings = async (_req: Request, res: Response): Promise<void> => {
     try {
-        const settings = await prisma.setting.findMany();
+        const settings = await prisma.setting.findMany({
+            where: { key: { not: { startsWith: "user." } } },
+        });
         const map: Record<string, unknown> = {};
         for (const s of settings) {
             if (s.type === "boolean") map[s.key] = s.value === "true";
@@ -71,8 +110,10 @@ export const updateAppSettings = async (req: Request, res: Response): Promise<vo
                 update: { value: strValue, type },
             });
         }
-        // Return all settings after update
-        const settings = await prisma.setting.findMany();
+        // Return all app settings after update (excluding user-scoped)
+        const settings = await prisma.setting.findMany({
+            where: { key: { not: { startsWith: "user." } } },
+        });
         const map: Record<string, unknown> = {};
         for (const s of settings) {
             if (s.type === "boolean") map[s.key] = s.value === "true";
