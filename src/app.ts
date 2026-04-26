@@ -7,12 +7,29 @@ const app = express();
 const corsOrigin = process.env.CORS_ORIGIN || "*";
 const listedOrigins = corsOrigin.split(",").map((origin) => origin.trim());
 
-// app.use((req, _res, next) => {
-// 	console.log("[request-origin]", req.headers.origin ?? "no-origin", req.method, req.originalUrl);
-// 	next();
-// });
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (mobile apps, curl, etc.)
+        if (!origin) return callback(null, true);
 
-app.use(cors({ origin: listedOrigins })); // Allow all origins for now; we can lock this down later if needed
+        // Allow exact matches from env
+        if (listedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+
+        // Allow local network: 192.168.15.*
+        if (/^http:\/\/192\.168\.15\.\d+(:\d+)?$/.test(origin)) {
+            return callback(null, true);
+        }
+
+        // Optional: allow all localhost variants
+        if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+            return callback(null, true);
+        }
+
+        return callback(new Error("Not allowed by CORS"));
+    }
+}));
 app.use(express.json());
 
 // Serve uploaded files
