@@ -74,6 +74,32 @@ export const updateSettings = (req: Request, res: Response): void => {
     res.json(updated);
 };
 
+// ─── Business Logo ────────────────────────────────────────────────────────────
+
+const LOGO_DIR = path.join(process.cwd(), "uploads", "logo");
+const LOGO_PATH = path.join(LOGO_DIR, "logo.png");
+
+export const uploadLogo = (req: Request, res: Response): void => {
+    if (!req.file) { res.status(400).json({ error: "No file uploaded" }); return; }
+    try {
+        fs.mkdirSync(LOGO_DIR, { recursive: true });
+        fs.writeFileSync(LOGO_PATH, req.file.buffer);
+        res.json({ url: "/uploads/logo/logo.png" });
+    } catch {
+        res.status(500).json({ error: "Failed to save logo" });
+    }
+};
+
+export const getLogo = (_req: Request, res: Response): void => {
+    if (!fs.existsSync(LOGO_PATH)) { res.status(404).json({ error: "No logo uploaded" }); return; }
+    try {
+        const base64 = fs.readFileSync(LOGO_PATH).toString("base64");
+        res.json({ base64 });
+    } catch {
+        res.status(500).json({ error: "Failed to read logo" });
+    }
+};
+
 // ─── App Settings (DB-stored key/value) ──────────────────────────────────────
 
 export const getAppSettings = async (_req: Request, res: Response): Promise<void> => {
