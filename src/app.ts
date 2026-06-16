@@ -10,6 +10,9 @@ app.use(express.json());
 // Serve uploaded files
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
+// Serve public folder for updates and general static files
+app.use("/public", express.static(path.join(process.cwd(), "public")));
+
 app.get("/", (_req, res) => res.json({ message: "POS API" }));
 app.get("/api/health", (_req, res) => res.json({ status: "OK" }));
 app.use("/api", apiRouter);

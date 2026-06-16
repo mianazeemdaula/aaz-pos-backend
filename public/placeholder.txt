@@ -1,0 +1,1 @@
+This folder contains public assets, including application updates (e.g. latest.json and setup exes).

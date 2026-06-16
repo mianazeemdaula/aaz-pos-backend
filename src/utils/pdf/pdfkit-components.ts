@@ -58,7 +58,7 @@ export function generateHeader(
     const hasQR = !!options.qrCode;
 
     // Background band
-    const headerHeight = options.height || 80;
+    const headerHeight = options.height || 55;
     doc.save();
     // doc.rect(startX - 5, yPos - 5, pageWidth + 10, headerHeight + 10)
     //     .fill(options.backgroundColor || "#f8fafc");
@@ -113,7 +113,7 @@ export function generateHeader(
         .strokeColor("#cbd5e1").lineWidth(0.5).stroke();
     doc.restore();
 
-    // ── COLUMN 3: Report Title, Subtitle, Date, Filters ──
+    // ── COLUMN 3: Report Title, Subtitle, Date ──
     let rightY = yPos;
 
     // Title (bold, colored)
@@ -134,32 +134,6 @@ export function generateHeader(
         applyFont(doc, { size: 7, color: "#94a3b8" });
         doc.text(`Generated: ${dayjs().format(dateFormat)}`, colX, rightY, { width: centerW - 5, align: "left" });
         rightY = doc.y + 4;
-    }
-
-    // Filter Info - compact pills
-    if (options.filterInfo && Object.keys(options.filterInfo).length > 0) {
-        const entries = Object.entries(options.filterInfo);
-
-        // Draw a subtle background box for the filter area
-        const filterBoxH = Math.ceil(entries.length / 2) * 14 + 6;
-        doc.save();
-        doc.roundedRect(colX, rightY, centerW - 10, filterBoxH, 3)
-            .fill("#eff6ff");
-        doc.fillColor("#000000");
-        doc.restore();
-
-        let fX = colX + 5;
-        let fY = rightY + 3;
-        const colWidth = (centerW - 20) / 2;
-        entries.forEach(([label, value], idx) => {
-            if (idx > 0 && idx % 2 === 0) { fX = colX + 5; fY += 14; }
-            applyFont(doc, { family: "Helvetica-Bold", size: 7, color: "#1e40af" });
-            doc.text(`${label}:`, fX, fY, { continued: true, width: colWidth });
-            applyFont(doc, { family: "Helvetica", size: 7, color: "#334155" });
-            doc.text(` ${value}`, { width: colWidth });
-            fX += colWidth;
-        });
-        rightY = fY + 16;
     }
 
     colX += centerW;
@@ -186,9 +160,46 @@ export function generateHeader(
         .strokeColor("#e2e8f0").lineWidth(0.5).stroke();
     doc.restore();
 
-    yPos += 10;
-    doc.y = yPos;
+    yPos += 8;
 
+    // Filter Info - compact horizontal bar below the header in a single row
+    if (options.filterInfo && Object.keys(options.filterInfo).length > 0) {
+        const entries = Object.entries(options.filterInfo);
+        const filterBarHeight = 15;
+        
+        doc.save();
+        // Light blue background pill spanning the page width
+        doc.roundedRect(startX, yPos, pageWidth, filterBarHeight, 3)
+            .fill("#eff6ff");
+        doc.restore();
+
+        doc.save();
+        let isFirst = true;
+        doc.x = startX + 6;
+        doc.y = yPos + 4; // center vertically inside the 15pt height box
+        
+        entries.forEach(([label, value]) => {
+            if (!isFirst) {
+                applyFont(doc, { family: "Helvetica", size: 7.5, color: "#3b82f6" });
+                doc.text("   •   ", { continued: true });
+            }
+            isFirst = false;
+            
+            applyFont(doc, { family: "Helvetica-Bold", size: 7.5, color: "#1e40af" });
+            doc.text(`${label}: `, { continued: true });
+            
+            applyFont(doc, { family: "Helvetica", size: 7.5, color: "#1e293b" });
+            doc.text(`${value}`, { continued: true });
+        });
+        doc.text(""); // end line
+        doc.restore();
+
+        yPos += filterBarHeight + 8;
+    } else {
+        yPos += 4;
+    }
+
+    doc.y = yPos;
     return yPos;
 }
 

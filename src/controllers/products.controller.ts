@@ -79,15 +79,30 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
                 avgCostPrice: initialCostPrice,
                 totalStock: initialStock,
                 variants: variants?.length ? {
-                    create: variants.map((v: any, i: number) => ({
-                        name: v.name,
-                        barcode: v.barcode,
-                        price: v.price,
-                        retail: v.retail == 0 ? v.price : v.retail,
-                        wholesale: v.wholesale == 0 ? v.price : v.wholesale,
-                        factor: v.factor ?? 1,
-                        isDefault: i === 0,
-                    })),
+                    create: (() => {
+                        const defaultV = variants.find((v: any) => v.isDefault) || variants[0];
+                        return variants.map((v: any, i: number) => {
+                            const isDefault = v.isDefault || (i === 0 && !variants.some((x: any) => x.isDefault));
+                            const factor = v.factor ?? 1;
+                            let price = v.price;
+                            let retail = v.retail == 0 ? v.price : v.retail;
+                            let wholesale = v.wholesale == 0 ? v.price : v.wholesale;
+                            if (!isDefault && defaultV) {
+                                price = defaultV.price * factor;
+                                retail = (defaultV.retail == 0 || !defaultV.retail ? defaultV.price : defaultV.retail) * factor;
+                                wholesale = (defaultV.wholesale == 0 || !defaultV.wholesale ? defaultV.price : defaultV.wholesale) * factor;
+                            }
+                            return {
+                                name: v.name,
+                                barcode: v.barcode,
+                                price,
+                                retail,
+                                wholesale,
+                                factor,
+                                isDefault,
+                            };
+                        });
+                    })(),
                 } : undefined,
                 stockMovements: initialStock !== 0 ? {
                     create: {
@@ -199,24 +214,49 @@ export const getVariant = async (req: Request, res: Response): Promise<void> => 
 export const createVariant = async (req: Request, res: Response): Promise<void> => {
     const productId = parseInt(req.params.id);
     const { name, barcode, price, retail, wholesale, factor } = req.body;
-    if (!name || !barcode || price === undefined) {
-        res.status(400).json({ error: "name, barcode and price are required" });
+    if (!name || !barcode) {
+        res.status(400).json({ error: "name and barcode are required" });
         return;
     }
     try {
-        const product = await prisma.product.findUnique({ where: { id: productId } });
+        const product = await prisma.product.findUnique({
+            where: { id: productId },
+            include: { variants: true }
+        });
         if (!product) { res.status(404).json({ error: "Product not found" }); return; }
+
+        const defaultVariant = product.variants.find(v => v.isDefault) || product.variants[0];
+        const f = factor ?? 1;
+
+        let finalPrice = price;
+        let finalRetail = retail;
+        let finalWholesale = wholesale;
+
+        if (defaultVariant) {
+            finalPrice = defaultVariant.price * f;
+            finalRetail = (defaultVariant.retail ?? defaultVariant.price) * f;
+            finalWholesale = (defaultVariant.wholesale ?? defaultVariant.price) * f;
+        } else {
+            finalPrice = price ?? 0;
+            finalRetail = retail == 0 ? finalPrice : (retail ?? finalPrice);
+            finalWholesale = wholesale == 0 ? finalPrice : (wholesale ?? finalPrice);
+        }
+
         const variant = await prisma.productVariant.create({
             data: {
-                productId, name, barcode, price,
-                retail: retail == 0 ? price : retail,
-                wholesale: wholesale == 0 ? price : wholesale,
-                factor: factor ?? 1,
+                productId,
+                name,
+                barcode,
+                price: finalPrice,
+                retail: finalRetail == 0 ? finalPrice : finalRetail,
+                wholesale: finalWholesale == 0 ? finalPrice : finalWholesale,
+                factor: f,
                 isDefault: false
             },
         });
         res.status(201).json(variant);
-    } catch {
+    } catch (error) {
+        console.error("Create variant error:", error);
         res.status(500).json({ error: "Failed to create variant — barcode may already exist" });
     }
 };
@@ -229,20 +269,60 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
             const existing = await prisma.productVariant.findFirst({ where: { barcode, NOT: { id } } });
             if (existing) { res.status(409).json({ error: "Barcode already in use" }); return; }
         }
-        const variant = await prisma.productVariant.update({
+
+        const variant = await prisma.productVariant.findUnique({ where: { id } });
+        if (!variant) { res.status(404).json({ error: "Variant not found" }); return; }
+
+        const isUpdatingDefault = isDefault ?? variant.isDefault;
+        const f = factor ?? variant.factor ?? 1;
+
+        let finalPrice = price ?? variant.price;
+        let finalRetail = retail === 0 ? finalPrice : (retail ?? variant.retail ?? finalPrice);
+        let finalWholesale = wholesale === 0 ? finalPrice : (wholesale ?? variant.wholesale ?? finalPrice);
+
+        if (!isUpdatingDefault) {
+            const defaultVariant = await prisma.productVariant.findFirst({
+                where: { productId: variant.productId, isDefault: true }
+            });
+            if (defaultVariant) {
+                finalPrice = defaultVariant.price * f;
+                finalRetail = (defaultVariant.retail ?? defaultVariant.price) * f;
+                finalWholesale = (defaultVariant.wholesale ?? defaultVariant.price) * f;
+            }
+        }
+
+        const updated = await prisma.productVariant.update({
             where: { id },
             data: {
                 name,
                 barcode,
-                price,
-                retail: retail == 0 ? price : retail,
-                wholesale: wholesale == 0 ? price : wholesale,
-                factor: factor ?? 1,
-                isDefault
+                price: finalPrice,
+                retail: finalRetail == 0 ? finalPrice : finalRetail,
+                wholesale: finalWholesale == 0 ? finalPrice : finalWholesale,
+                factor: f,
+                isDefault: isUpdatingDefault
             },
         });
-        res.json(variant);
-    } catch {
+
+        if (updated.isDefault) {
+            const otherVariants = await prisma.productVariant.findMany({
+                where: { productId: updated.productId, isDefault: false }
+            });
+            for (const other of otherVariants) {
+                await prisma.productVariant.update({
+                    where: { id: other.id },
+                    data: {
+                        price: updated.price * other.factor,
+                        retail: (updated.retail ?? updated.price) * other.factor,
+                        wholesale: (updated.wholesale ?? updated.price) * other.factor,
+                    }
+                });
+            }
+        }
+
+        res.json(updated);
+    } catch (error) {
+        console.error("Update variant error:", error);
         res.status(500).json({ error: "Failed to update variant" });
     }
 };
@@ -464,6 +544,20 @@ async function processProduct(
             variantData[0].isDefault = true;
         }
 
+        // Apply factor automatically to all non-default variants
+        const defaultIndex = variantData.findIndex(v => v.isDefault);
+        const defV = defaultIndex !== -1 ? variantData[defaultIndex] : variantData[0];
+        if (defV) {
+            variantData.forEach((v) => {
+                if (v !== defV) {
+                    const f = v.factor ?? 1;
+                    v.price = defV.price * f;
+                    v.retail = defV.price * f;
+                    v.wholesale = defV.price * f;
+                }
+            });
+        }
+
         // Filter out variants with duplicate barcodes before insert
         const safeBarcodes: string[] = [];
         const safeVariants = [];
@@ -516,16 +610,25 @@ async function processVariant(
     try {
         const exists = await prisma.productVariant.findUnique({ where: { barcode: v.barcode } });
         if (exists) { skipped.variants++; return; }
+
+        const defaultVariant = await prisma.productVariant.findFirst({
+            where: { productId, isDefault: true }
+        });
+        const f = v.factor ?? 1;
+        const finalPrice = defaultVariant ? defaultVariant.price * f : v.price;
+        const finalRetail = defaultVariant ? (defaultVariant.retail ?? defaultVariant.price) * f : v.price;
+        const finalWholesale = defaultVariant ? (defaultVariant.wholesale ?? defaultVariant.price) * f : v.price;
+
         await prisma.productVariant.create({
             data: {
                 productId,
                 name: v.name,
                 barcode: v.barcode,
-                price: v.price,
-                retail: v.price,
-                wholesale: v.price,
-                factor: v.factor ?? 1,
-                isDefault: v.name.toLowerCase().includes("unit") && v.factor === 1,
+                price: finalPrice,
+                retail: finalRetail,
+                wholesale: finalWholesale,
+                factor: f,
+                isDefault: v.name.toLowerCase().includes("unit") && f === 1,
             },
         });
         stats.variants++;

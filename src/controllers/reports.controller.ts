@@ -453,6 +453,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
         doc.x = doc.page.margins.left;
         doc.fontSize(10).font("Helvetica-Bold").text("Payment Method Breakdown (Reconciliation)", { underline: true });
         pdfGen.moveDown(0.2);
+        doc.font('Helvetica').fontSize(9);
 
         const paymentTable = doc.table({
             columnStyles: [200, 150],
@@ -2721,7 +2722,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
             data.salesCount += 1;
             data.totalRevenue += sale.totalAmount;
             data.totalDiscount += sale.discount;
-            
+
             // COGS
             const cogs = sale.items.reduce((s, item) => s + (item.avgCostPrice ?? 0) * item.quantity, 0);
             data.totalCOGS += cogs;
@@ -2781,8 +2782,9 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
         } else {
             for (const c of list) {
                 // Section header for cashier
-                doc.fontSize(11).font("Helvetica-Bold").fillColor("#1e40af").text(`${c.name} (${c.role})`);
+                doc.fontSize(10).font("Helvetica-Bold").fillColor("#1e40af").text(`${c.name} (${c.role})`);
                 pdfGen.moveDown(0.3);
+                doc.font('Helvetica').fontSize(9);
 
                 // Summary table
                 const sumTable = doc.table({
@@ -2810,6 +2812,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                 // Payments breakdown sub-table
                 doc.fontSize(9).font("Helvetica-Bold").fillColor("#475569").text("Payment Accounts Breakdown:");
                 pdfGen.moveDown(0.15);
+                doc.font('Helvetica').fontSize(9);
 
                 const payTable = doc.table({
                     columnStyles: [150, 120],
@@ -2838,10 +2841,10 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                 const currentY = doc.y;
                 if (currentY < doc.page.height - doc.page.margins.bottom - 50) {
                     doc.moveTo(doc.page.margins.left, currentY)
-                       .lineTo(doc.page.width - doc.page.margins.right, currentY)
-                       .strokeColor("#e2e8f0")
-                       .lineWidth(0.5)
-                       .stroke();
+                        .lineTo(doc.page.width - doc.page.margins.right, currentY)
+                        .strokeColor("#e2e8f0")
+                        .lineWidth(0.5)
+                        .stroke();
                     pdfGen.moveDown(0.8);
                 } else {
                     doc.addPage();
