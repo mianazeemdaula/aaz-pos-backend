@@ -15,6 +15,7 @@ import {
     getStockReportPDF,
     getDailyReportPDF,
     getSupplierBusinessReportPDF,
+    getCashierSalesReportPDF,
 } from "../controllers/reports.controller";
 
 const router = Router();
@@ -23,6 +24,7 @@ const router = Router();
 router.get("/dashboard", getDashboardStats);
 // PDF report endpoints
 router.get("/sales", getSalesReportPDF);
+router.get("/cashier-sales", getCashierSalesReportPDF);
 router.get("/purchases", getPurchasesReportPDF);
 router.get("/inventory", getInventoryReportPDF);
 router.get("/expenses", getExpensesReportPDF);
