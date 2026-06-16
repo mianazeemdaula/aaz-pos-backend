@@ -2694,6 +2694,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
             salesCount: number;
             totalRevenue: number;
             totalCOGS: number;
+            totalDiscount: number;
             grossProfit: number;
             payments: Record<string, number>;
         }>();
@@ -2710,6 +2711,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                     salesCount: 0,
                     totalRevenue: 0,
                     totalCOGS: 0,
+                    totalDiscount: 0,
                     grossProfit: 0,
                     payments: {},
                 });
@@ -2718,6 +2720,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
             const data = cashierMap.get(uId)!;
             data.salesCount += 1;
             data.totalRevenue += sale.totalAmount;
+            data.totalDiscount += sale.discount;
             
             // COGS
             const cogs = sale.items.reduce((s, item) => s + (item.avgCostPrice ?? 0) * item.quantity, 0);
@@ -2783,22 +2786,22 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
 
                 // Summary table
                 const sumTable = doc.table({
-                    columnStyles: [120, 100, 100, 100, 100],
+                    columnStyles: [110, 110, 110, 110, 110],
                     rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f8fafc", fontSize: 9, fontStyle: "bold" } : {},
                 });
                 sumTable.row([
                     { text: "Sales Count", align: { x: "left", y: "center" } },
                     { text: "Total Revenue", align: { x: "right", y: "center" } },
+                    { text: "Total Discounts", align: { x: "right", y: "center" } },
                     { text: "Total COGS", align: { x: "right", y: "center" } },
                     { text: "Gross Profit", align: { x: "right", y: "center" } },
-                    { text: "", align: { x: "left", y: "center" } } // empty space for balance
                 ]);
                 sumTable.row([
                     { text: String(c.salesCount), align: { x: "left", y: "center" } },
                     { text: fmtCurrency(c.totalRevenue), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(c.totalDiscount), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(c.totalCOGS), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(c.grossProfit), align: { x: "right", y: "center" } },
-                    { text: "", align: { x: "left", y: "center" } }
                 ]);
                 sumTable.end();
 
