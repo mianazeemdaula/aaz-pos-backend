@@ -349,13 +349,16 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const getSalesReportPDF = async (req: Request, res: Response): Promise<void> => {
-    const { from, to } = req.query;
+    const { from, to, userId } = req.query;
     const where: any = {};
     if (from) where.createdAt = { ...where.createdAt, gte: new Date(from as string) };
     if (to) {
         const toDate = new Date(to as string);
         toDate.setHours(23, 59, 59, 999);
         where.createdAt = { ...where.createdAt, lte: toDate };
+    }
+    if (userId) {
+        where.userId = parseInt(userId as string);
     }
 
     try {
@@ -364,6 +367,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
             orderBy: { createdAt: "desc" },
             include: {
                 customer: { select: { name: true } },
+                user: { select: { name: true } },
                 items: { select: { quantity: true, avgCostPrice: true, totalPrice: true } },
             },
         });
@@ -381,6 +385,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
             sno: i + 1,
             date: sale.createdAt,
             customer: sale.customer?.name ?? "Walk-in",
+            cashier: sale.user?.name ?? "N/A",
             itemsCount: sale.items.length,
             discount: sale.discount,
             tax: sale.taxAmount,
@@ -389,11 +394,18 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
             due: sale.totalAmount - sale.paidAmount,
         }));
 
+        let cashierName = "All";
+        if (userId) {
+            const u = await prisma.user.findUnique({ where: { id: parseInt(userId as string) }, select: { name: true } });
+            if (u) cashierName = u.name;
+        }
+
         const salesQr = await generateQRBuffer(`Sales Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Txns: ${sales.length}`);
         const pdfGen = createPDFGenerator(
             pdfConfig("Sales Report", "Sales Transaction Summary", {
                 "From": from ? fmtDate(from as string) : "All Time",
                 "To": to ? fmtDate(to as string) : "Now",
+                "Cashier": cashierName,
                 "Transactions": sales.length,
             }, "landscape", "A4", salesQr)
         );
@@ -423,16 +435,17 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
 
         pdfGen.moveDown(0.5);
 
-        // Main transactions table — 9 columns
+        // Main transactions table — 10 columns
         doc.x = doc.page.margins.left;
         const table = doc.table({
-            columnStyles: [30, 80, "*", 50, 75, 75, 80, 80, 80],
+            columnStyles: [30, 80, "*", 80, 40, 60, 60, 70, 70, 70],
             rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
         });
         table.row([
             { text: "#", align: { x: "center", y: "center" } },
             { text: "Date", align: { x: "center", y: "center" } },
             { text: "Customer", align: { x: "left", y: "center" } },
+            { text: "Cashier", align: { x: "left", y: "center" } },
             { text: "Items", align: { x: "center", y: "center" } },
             { text: "Discount", align: { x: "right", y: "center" } },
             { text: "Tax", align: { x: "right", y: "center" } },
@@ -445,6 +458,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
                 { text: String(row.sno), align: { x: "center", y: "center" } },
                 { text: fmtDate(row.date, "DD-MM-YYYY hh:mm A"), align: { x: "center", y: "center" } },
                 { text: row.customer, align: { x: "left", y: "center" } },
+                { text: row.cashier, align: { x: "left", y: "center" } },
                 { text: String(row.itemsCount), align: { x: "center", y: "center" } },
                 { text: fmtCurrency(row.discount), align: { x: "right", y: "center" } },
                 { text: fmtCurrency(row.tax), align: { x: "right", y: "center" } },
@@ -455,7 +469,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
         });
         doc.fontSize(9);
         table.row([
-            { text: "Grand Total", colSpan: 4, align: { x: "justify", y: "center" } },
+            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
             { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
             { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
             { text: fmtCurrency(totalRevenue), align: { x: "right", y: "center" } },
@@ -1040,6 +1054,7 @@ export const getCustomerStatementPDF = async (req: Request, res: Response): Prom
         const paymentsCount = ledgerEntries.filter((e) => e.type === "PAYMENT").length;
 
         const reportFonts = fonts();
+        const company = readSettings();
         const pdfGen = createPDFGenerator({
             fontRegistrations: reportFonts.registrations,
             fontFamilyMap: reportFonts.aliasMap,
@@ -1051,6 +1066,9 @@ export const getCustomerStatementPDF = async (req: Request, res: Response): Prom
                 title: "Customer Account Statement",
                 subtitle: `Customer: ${customer.name}`,
                 logo: { path: logoPath, width: 60, height: 60 },
+                companyName: (company.businessName as string) || undefined,
+                address: (company.address as string) || undefined,
+                phone: (company.phone as string) || undefined,
                 showDate: true,
                 titleFont: { size: 16 },
                 subtitleFont: { size: 10, color: "#666666" },
@@ -1060,7 +1078,7 @@ export const getCustomerStatementPDF = async (req: Request, res: Response): Prom
                 },
             },
             footer: {
-                leftText: "POS System",
+                leftText: (company.businessName as string) || "POS System",
                 centerText: "Customer Statement",
                 showPageNumber: true,
                 font: { size: 8, color: "#666666" },
@@ -1205,6 +1223,7 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
         const paymentsCount = ledgerEntries.filter((e) => e.type === "PAYMENT").length;
 
         const reportFonts = fonts();
+        const company = readSettings();
         const pdfGen = createPDFGenerator({
             fontRegistrations: reportFonts.registrations,
             fontFamilyMap: reportFonts.aliasMap,
@@ -1216,6 +1235,9 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
                 title: "Supplier Account Statement",
                 subtitle: `Supplier: ${supplier.name}`,
                 logo: { path: logoPath, width: 60, height: 60 },
+                companyName: (company.businessName as string) || undefined,
+                address: (company.address as string) || undefined,
+                phone: (company.phone as string) || undefined,
                 showDate: true,
                 titleFont: { family: "Helvetica-Bold" as const, size: 16 },
                 subtitleFont: { size: 10, color: "#666666" },
@@ -1225,7 +1247,7 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
                 },
             },
             footer: {
-                leftText: "POS System",
+                leftText: (company.businessName as string) || "POS System",
                 centerText: "Supplier Statement",
                 showPageNumber: true,
                 font: { size: 8, color: "#666666" },
@@ -1381,6 +1403,7 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
         const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : (from ? openingBalance : customer.balance);
 
         const reportFonts = fonts();
+        const company = readSettings();
         const pdfGen = createPDFGenerator({
             fontRegistrations: reportFonts.registrations,
             fontFamilyMap: reportFonts.aliasMap,
@@ -1389,6 +1412,9 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
                 title: "Customer Ledger Report",
                 subtitle: `Customer: ${customer.name}`,
                 logo: { path: logoPath, width: 60, height: 60 },
+                companyName: (company.businessName as string) || undefined,
+                address: (company.address as string) || undefined,
+                phone: (company.phone as string) || undefined,
                 showDate: true,
                 titleFont: { size: 16 },
                 subtitleFont: { size: 10, color: "#666666" },
@@ -1398,7 +1424,7 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
                 },
             },
             footer: {
-                leftText: "POS System",
+                leftText: (company.businessName as string) || "POS System",
                 centerText: "Customer Ledger",
                 showPageNumber: true,
                 font: { size: 8, color: "#666666" },
@@ -1550,6 +1576,7 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
         const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : (from ? openingBalance : supplier.balance);
 
         const reportFonts = fonts();
+        const company = readSettings();
         const pdfGen = createPDFGenerator({
             fontRegistrations: reportFonts.registrations,
             fontFamilyMap: reportFonts.aliasMap,
@@ -1558,6 +1585,9 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
                 title: "Supplier Ledger Report",
                 subtitle: `Supplier: ${supplier.name}`,
                 logo: { path: logoPath, width: 60, height: 60 },
+                companyName: (company.businessName as string) || undefined,
+                address: (company.address as string) || undefined,
+                phone: (company.phone as string) || undefined,
                 showDate: true,
                 titleFont: { family: "Helvetica-Bold" as const, size: 16 },
                 subtitleFont: { size: 10, color: "#666666" },
@@ -1567,7 +1597,7 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
                 },
             },
             footer: {
-                leftText: "POS System",
+                leftText: (company.businessName as string) || "POS System",
                 centerText: "Supplier Ledger",
                 showPageNumber: true,
                 font: { size: 8, color: "#666666" },
@@ -1858,6 +1888,7 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
 
         // PDF
         const reportFonts = fonts();
+        const company = readSettings();
         const pdfGen = createPDFGenerator({
             fontRegistrations: reportFonts.registrations,
             fontFamilyMap: reportFonts.aliasMap,
@@ -1870,6 +1901,9 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 title: "Account Statement",
                 subtitle: `${account.code} — ${account.name} (${account.type})`,
                 logo: { path: logoPath, width: 60, height: 60 },
+                companyName: (company.businessName as string) || undefined,
+                address: (company.address as string) || undefined,
+                phone: (company.phone as string) || undefined,
                 showDate: true,
                 titleFont: { family: "Helvetica-Bold" as const, size: 16 },
                 subtitleFont: { size: 10, color: "#666666" },
@@ -1882,7 +1916,7 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 },
             },
             footer: {
-                leftText: "POS System",
+                leftText: (company.businessName as string) || "POS System",
                 centerText: "Account Statement",
                 showPageNumber: true,
                 font: { size: 8, color: "#666666" },

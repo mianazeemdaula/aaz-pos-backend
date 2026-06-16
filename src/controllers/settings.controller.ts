@@ -41,38 +41,129 @@ const DEFAULT_SETTINGS: Record<string, unknown> = {
     defaultTaxRate: 0,
 };
 
-export function readSettings(): Record<string, unknown> {
+let settingsCache: Record<string, any> = { ...DEFAULT_SETTINGS };
+
+export async function loadSettingsFromDb(): Promise<Record<string, any>> {
     try {
-        // Read encrypted settings
-        if (fs.existsSync(SETTINGS_FILE)) {
-            const raw = fs.readFileSync(SETTINGS_FILE, "utf-8");
-            return JSON.parse(decryptData(raw));
+        const settings = await prisma.setting.findMany({
+            where: { key: { startsWith: "company." } }
+        });
+        const companySettings: Record<string, any> = { ...DEFAULT_SETTINGS };
+        for (const s of settings) {
+            const shortKey = s.key.replace("company.", "");
+            if (s.type === "boolean") companySettings[shortKey] = s.value === "true";
+            else if (s.type === "number") companySettings[shortKey] = Number(s.value);
+            else if (s.type === "json") {
+                try { companySettings[shortKey] = JSON.parse(s.value); } catch { companySettings[shortKey] = s.value; }
+            }
+            else companySettings[shortKey] = s.value;
         }
-        // Migrate from legacy plain-text settings.json
-        if (fs.existsSync(SETTINGS_FILE_LEGACY)) {
-            const data = JSON.parse(fs.readFileSync(SETTINGS_FILE_LEGACY, "utf-8"));
-            writeSettings(data);
-            fs.unlinkSync(SETTINGS_FILE_LEGACY);
-            return data;
-        }
-    } catch { /* fallback */ }
-    return { ...DEFAULT_SETTINGS };
+        settingsCache = companySettings;
+        return settingsCache;
+    } catch (err) {
+        console.error("Failed to load settings from DB:", err);
+        return settingsCache;
+    }
 }
 
-function writeSettings(data: Record<string, unknown>) {
-    fs.writeFileSync(SETTINGS_FILE, encryptData(JSON.stringify(data)), "utf-8");
+export async function initializeCompanySettings(): Promise<void> {
+    try {
+        // Check if there is data on disk
+        let legacyData: Record<string, any> | null = null;
+        if (fs.existsSync(SETTINGS_FILE)) {
+            try {
+                const raw = fs.readFileSync(SETTINGS_FILE, "utf-8");
+                legacyData = JSON.parse(decryptData(raw));
+            } catch (err) {
+                console.error("Failed to decrypt settings.dat:", err);
+            }
+        } else if (fs.existsSync(SETTINGS_FILE_LEGACY)) {
+            try {
+                legacyData = JSON.parse(fs.readFileSync(SETTINGS_FILE_LEGACY, "utf-8"));
+            } catch (err) {
+                console.error("Failed to parse settings.json:", err);
+            }
+        }
+
+        // If legacy data was read, import it to DB
+        if (legacyData) {
+            for (const [key, value] of Object.entries(legacyData)) {
+                const fullKey = `company.${key}`;
+                const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+                const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : typeof value === "object" ? "json" : "string";
+                await prisma.setting.upsert({
+                    where: { key: fullKey },
+                    create: { key: fullKey, value: strValue, type },
+                    update: { value: strValue, type }
+                });
+            }
+            // Delete the local files to finish migration
+            if (fs.existsSync(SETTINGS_FILE)) {
+                fs.unlinkSync(SETTINGS_FILE);
+            }
+            if (fs.existsSync(SETTINGS_FILE_LEGACY)) {
+                fs.unlinkSync(SETTINGS_FILE_LEGACY);
+            }
+            console.log("Migrated company settings from files to DB.");
+        } else {
+            // Check if DB already has company settings, if not initialize with defaults
+            const count = await prisma.setting.count({
+                where: { key: { startsWith: "company." } }
+            });
+            if (count === 0) {
+                for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+                    const fullKey = `company.${key}`;
+                    const strValue = String(value);
+                    const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "string";
+                    await prisma.setting.create({
+                        data: { key: fullKey, value: strValue, type }
+                    });
+                }
+                console.log("Initialized DB with default company settings.");
+            }
+        }
+
+        // Populate the cache from DB
+        await loadSettingsFromDb();
+    } catch (err) {
+        console.error("Error in initializeCompanySettings:", err);
+        // Fallback: load default settings to cache
+        settingsCache = { ...DEFAULT_SETTINGS };
+    }
+}
+
+export function readSettings(): Record<string, unknown> {
+    return settingsCache;
 }
 
 export const getSettings = (_req: Request, res: Response): void => {
     res.json(readSettings());
 };
 
-export const updateSettings = (req: Request, res: Response): void => {
-    const current = readSettings();
-    const updated = { ...current, ...req.body };
-    writeSettings(updated);
-    res.json(updated);
+export const updateSettings = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const current = readSettings();
+        const updated = { ...current, ...req.body };
+        
+        for (const [key, value] of Object.entries(updated)) {
+            const fullKey = `company.${key}`;
+            const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+            const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : typeof value === "object" ? "json" : "string";
+            await prisma.setting.upsert({
+                where: { key: fullKey },
+                create: { key: fullKey, value: strValue, type },
+                update: { value: strValue, type }
+            });
+        }
+        
+        await loadSettingsFromDb();
+        res.json(readSettings());
+    } catch (err) {
+        console.error("Failed to update company settings:", err);
+        res.status(500).json({ error: "Failed to update company settings" });
+    }
 };
+
 
 // ─── Business Logo ────────────────────────────────────────────────────────────
 
@@ -321,9 +412,19 @@ export const restoreDatabase = async (req: Request, res: Response): Promise<void
     }
 
     try {
-        // Restore settings file
+        // Restore settings in DB
         if (backup.settings) {
-            writeSettings(backup.settings);
+            for (const [key, value] of Object.entries(backup.settings)) {
+                const fullKey = `company.${key}`;
+                const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+                const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : typeof value === "object" ? "json" : "string";
+                await prisma.setting.upsert({
+                    where: { key: fullKey },
+                    create: { key: fullKey, value: strValue, type },
+                    update: { value: strValue, type }
+                });
+            }
+            await loadSettingsFromDb();
         }
 
         const d = backup.data;

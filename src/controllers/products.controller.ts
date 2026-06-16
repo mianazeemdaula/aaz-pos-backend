@@ -62,20 +62,22 @@ export const getProduct = async (req: Request, res: Response): Promise<void> => 
 };
 
 export const createProduct = async (req: Request, res: Response): Promise<void> => {
-    const { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost, variants } = req.body;
+    const { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost, variants, costPrice, stock } = req.body;
     if (!name || !categoryId) {
         res.status(400).json({ error: "name and categoryId are required" });
         return;
     }
     try {
-        const costPrice = variants?.[0]?.price * 0.90 || 0;
+        const initialCostPrice = costPrice !== undefined && costPrice !== null ? Number(costPrice) : (variants?.[0]?.price * 0.90 || 0);
+        const initialStock = stock !== undefined && stock !== null ? Number(stock) : 0;
         const product = await prisma.product.create({
             data: {
                 name, brandId, categoryId,
                 reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId,
                 taxMethod, taxRate, active,
                 isService, showBarcodePrice, isFavorite, saleBelowCost,
-                avgCostPrice: costPrice,
+                avgCostPrice: initialCostPrice,
+                totalStock: initialStock,
                 variants: variants?.length ? {
                     create: variants.map((v: any, i: number) => ({
                         name: v.name,
@@ -86,6 +88,13 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
                         factor: v.factor ?? 1,
                         isDefault: i === 0,
                     })),
+                } : undefined,
+                stockMovements: initialStock !== 0 ? {
+                    create: {
+                        type: "OPENING",
+                        quantity: initialStock,
+                        note: "Opening Stock",
+                    }
                 } : undefined,
             },
             include: { brand: true, category: true, variants: true },
@@ -110,15 +119,43 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
 
 export const updateProduct = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost } = req.body;
+    const { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost, costPrice, stock } = req.body;
     try {
+        const currentProduct = await prisma.product.findUnique({ where: { id } });
+        if (!currentProduct) {
+            res.status(404).json({ error: "Product not found" });
+            return;
+        }
+
+        const updateData: any = { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost };
+        
+        if (costPrice !== undefined && costPrice !== null) {
+            updateData.avgCostPrice = Number(costPrice);
+        }
+
+        if (stock !== undefined && stock !== null) {
+            const parsedStock = Number(stock);
+            if (parsedStock !== currentProduct.totalStock) {
+                const stockDiff = parsedStock - currentProduct.totalStock;
+                updateData.totalStock = parsedStock;
+                updateData.stockMovements = {
+                    create: {
+                        type: "ADJUSTMENT",
+                        quantity: stockDiff,
+                        note: "Product edit manual adjustment",
+                    }
+                };
+            }
+        }
+
         const product = await prisma.product.update({
             where: { id },
-            data: { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost },
+            data: updateData,
             include: { brand: true, category: true, variants: true },
         });
         res.json(product);
-    } catch {
+    } catch (error) {
+        console.error("Update product error:", error);
         res.status(500).json({ error: "Failed to update product" });
     }
 };

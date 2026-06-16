@@ -3,6 +3,7 @@ import { seedDatabase } from "./prisma/seed";
 import { migrateDatabase } from "./prisma/migrate";
 import { prisma } from "./prisma/prisma";
 import { checkForUpdates } from "./utils/auto-updater";
+import { initializeCompanySettings } from "./controllers/settings.controller";
 // https://o.fbr.gov.pk/newcu/tariff/ByDescriptionSearch.asp
 const PORT = process.env.PORT || 4001;
 
@@ -45,6 +46,9 @@ async function bootstrap() {
   await checkForUpdates();
 
   await checkDatabaseConnection();
+
+  // Initialize and cache company settings
+  await initializeCompanySettings();
 
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
