@@ -369,6 +369,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
                 customer: { select: { name: true } },
                 user: { select: { name: true } },
                 items: { select: { quantity: true, avgCostPrice: true, totalPrice: true } },
+                payments: { include: { account: { select: { name: true } } } },
             },
         });
 
@@ -432,6 +433,42 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
             { text: fmtCurrency(grossProfit), align: { x: "left", y: "center" } },
         ]);
         summaryTable.end();
+
+        pdfGen.moveDown(0.3);
+
+        // Calculate payment method breakdown
+        const accountBreakdown: Record<string, number> = {};
+        for (const sale of sales) {
+            for (const p of sale.payments) {
+                const accName = p.account?.name || "Cash";
+                const netAmount = p.amount - (p.changeAmount || 0);
+                accountBreakdown[accName] = (accountBreakdown[accName] || 0) + netAmount;
+            }
+        }
+        if (!accountBreakdown["Cash"] && !accountBreakdown["cash"]) {
+            accountBreakdown["Cash"] = 0;
+        }
+
+        // Payment Breakdown section for Shift Closing
+        doc.x = doc.page.margins.left;
+        doc.fontSize(10).font("Helvetica-Bold").text("Payment Method Breakdown (Reconciliation)", { underline: true });
+        pdfGen.moveDown(0.2);
+
+        const paymentTable = doc.table({
+            columnStyles: [200, 150],
+            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f8fafc", fontSize: 9, fontStyle: "bold" } : {},
+        });
+        paymentTable.row([
+            { text: "Payment Account / Method", align: { x: "left", y: "center" } },
+            { text: "Net Amount Collected", align: { x: "right", y: "center" } },
+        ]);
+        Object.entries(accountBreakdown).forEach(([accName, amount]) => {
+            paymentTable.row([
+                { text: accName, align: { x: "left", y: "center" } },
+                { text: fmtCurrency(amount), align: { x: "right", y: "center" } },
+            ]);
+        });
+        paymentTable.end();
 
         pdfGen.moveDown(0.5);
 
