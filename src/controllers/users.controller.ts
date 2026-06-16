@@ -50,7 +50,7 @@ export const getUser = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const createUser = async (req: Request, res: Response): Promise<void> => {
-    const { name, username, password, role, phone, address } = req.body;
+    const { name, username, password, role, phone, address, status } = req.body;
     if (!name || !username || !password || !role) {
         res.status(400).json({ error: "name, username, password and role are required" });
         return;
@@ -68,20 +68,33 @@ export const createUser = async (req: Request, res: Response): Promise<void> => 
         if (existing) { res.status(409).json({ error: "Username already taken" }); return; }
         const hash = await bcrypt.hash(password, 10);
         const user = await prisma.user.create({
-            data: { name, username, password: hash, role, phone, address },
+            data: { 
+                name, 
+                username, 
+                password: hash, 
+                role, 
+                phone, 
+                address, 
+                status: status !== undefined ? status : true 
+            },
             select: { id: true, name: true, username: true, role: true, phone: true, address: true, status: true, createdAt: true },
         });
         res.status(201).json(user);
-    } catch {
+    } catch (error) {
+        console.error("Error in createUser:", error);
         res.status(500).json({ error: "Failed to create user" });
     }
 };
 
 export const updateUser = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, username, role, phone, address, status } = req.body;
+    const { name, username, password, role, phone, address, status } = req.body;
     if (role && !VALID_ROLES.includes(role)) {
         res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(", ")}` });
+        return;
+    }
+    if (password && password.length < 6) {
+        res.status(400).json({ error: "password must be at least 6 characters" });
         return;
     }
     try {
@@ -89,13 +102,20 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
             const existing = await prisma.user.findFirst({ where: { username, NOT: { id } } });
             if (existing) { res.status(409).json({ error: "Username already taken" }); return; }
         }
+        
+        const updateData: any = { name, username, role, phone, address, status };
+        if (password) {
+            updateData.password = await bcrypt.hash(password, 10);
+        }
+
         const user = await prisma.user.update({
             where: { id },
-            data: { name, username, role, phone, address, status },
+            data: updateData,
             select: { id: true, name: true, username: true, role: true, phone: true, address: true, status: true, updatedAt: true },
         });
         res.json(user);
-    } catch {
+    } catch (error) {
+        console.error("Error in updateUser:", error);
         res.status(500).json({ error: "Failed to update user" });
     }
 };
