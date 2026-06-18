@@ -13,12 +13,8 @@ export const listPurchases = async (req: Request, res: Response): Promise<void> 
     else if (req.query.type === 'PURCHASE') where.totalAmount = { gte: 0 };
     if (req.query.from || req.query.to) {
         where.date = {};
-        if (req.query.from) where.date.gte = new Date(req.query.from as string);
-        if (req.query.to) {
-            const toDate = new Date(req.query.to as string);
-            toDate.setHours(23, 59, 59, 999);
-            where.date.lte = toDate;
-        }
+        if (req.query.from) where.date.gte = new Date(`${req.query.from}T00:00:00.000`);
+        if (req.query.to) where.date.lte = new Date(`${req.query.to}T23:59:59.999`);
     }
 
     try {

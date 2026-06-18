@@ -351,12 +351,8 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
 export const getSalesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to, userId } = req.query;
     const where: any = {};
-    if (from) where.createdAt = { ...where.createdAt, gte: new Date(from as string) };
-    if (to) {
-        const toDate = new Date(to as string);
-        toDate.setHours(23, 59, 59, 999);
-        where.createdAt = { ...where.createdAt, lte: toDate };
-    }
+    if (from) where.createdAt = { ...where.createdAt, gte: new Date(`${from}T00:00:00.000`) };
+    if (to) where.createdAt = { ...where.createdAt, lte: new Date(`${to}T23:59:59.999`) };
     if (userId) {
         where.userId = parseInt(userId as string);
     }
@@ -530,8 +526,8 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
 export const getPurchasesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to } = req.query;
     const where: any = {};
-    if (from) where.date = { ...where.date, gte: new Date(from as string) };
-    if (to) where.date = { ...where.date, lte: new Date(to as string) };
+    if (from) where.date = { ...where.date, gte: new Date(`${from}T00:00:00.000`) };
+    if (to) where.date = { ...where.date, lte: new Date(`${to}T23:59:59.999`) };
 
     try {
         const purchases = await prisma.purchase.findMany({
@@ -772,8 +768,8 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
 export const getExpensesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to } = req.query;
     const where: any = {};
-    if (from) where.date = { ...where.date, gte: new Date(from as string) };
-    if (to) where.date = { ...where.date, lte: new Date(to as string) };
+    if (from) where.date = { ...where.date, gte: new Date(`${from}T00:00:00.000`) };
+    if (to) where.date = { ...where.date, lte: new Date(`${to}T23:59:59.999`) };
 
     try {
         const expenses = await prisma.expense.findMany({
@@ -1064,8 +1060,8 @@ export const getCustomerStatementPDF = async (req: Request, res: Response): Prom
         if (!customer) { res.status(404).json({ message: "Customer not found" }); return; }
 
         const ledgerWhere: any = { customerId };
-        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(from as string) };
-        if (to) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: new Date(to as string) };
+        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(`${from}T00:00:00.000`) };
+        if (to) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: new Date(`${to}T23:59:59.999`) };
 
         const ledgerEntries = await prisma.customerLedger.findMany({
             where: ledgerWhere,
@@ -1236,8 +1232,8 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
         if (!supplier) { res.status(404).json({ message: "Supplier not found" }); return; }
 
         const ledgerWhere: any = { supplierId };
-        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(from as string) };
-        if (to) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: new Date(to as string) };
+        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(`${from}T00:00:00.000`) };
+        if (to) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: new Date(`${to}T23:59:59.999`) };
 
         const ledgerEntries = await prisma.supplierLedger.findMany({
             where: ledgerWhere,
@@ -1405,12 +1401,8 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
         if (!customer) { res.status(404).json({ message: "Customer not found" }); return; }
 
         const ledgerWhere: any = { customerId };
-        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(from as string) };
-        if (to) {
-            const toDate = new Date(to as string);
-            toDate.setHours(23, 59, 59, 999);
-            ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: toDate };
-        }
+        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(`${from}T00:00:00.000`) };
+        if (to) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: new Date(`${to}T23:59:59.999`) };
 
         const entries = await prisma.customerLedger.findMany({
             where: ledgerWhere,
@@ -1421,7 +1413,7 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
         let openingBalance = 0;
         if (from) {
             const lastBefore = await prisma.customerLedger.findFirst({
-                where: { customerId, createdAt: { lt: new Date(from as string) } },
+                where: { customerId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
                 orderBy: { createdAt: "desc" },
             });
             openingBalance = lastBefore ? lastBefore.balance : 0;
@@ -1578,12 +1570,8 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
         if (!supplier) { res.status(404).json({ message: "Supplier not found" }); return; }
 
         const ledgerWhere: any = { supplierId };
-        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(from as string) };
-        if (to) {
-            const toDate = new Date(to as string);
-            toDate.setHours(23, 59, 59, 999);
-            ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: toDate };
-        }
+        if (from) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, gte: new Date(`${from}T00:00:00.000`) };
+        if (to) ledgerWhere.createdAt = { ...ledgerWhere.createdAt, lte: new Date(`${to}T23:59:59.999`) };
 
         const entries = await prisma.supplierLedger.findMany({
             where: ledgerWhere,
@@ -1594,7 +1582,7 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
         let openingBalance = 0;
         if (from) {
             const lastBefore = await prisma.supplierLedger.findFirst({
-                where: { supplierId, createdAt: { lt: new Date(from as string) } },
+                where: { supplierId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
                 orderBy: { createdAt: "desc" },
             });
             openingBalance = lastBefore ? lastBefore.balance : 0;
@@ -1751,13 +1739,8 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
 
     if (isNaN(accountId)) { res.status(400).json({ error: "Invalid account id" }); return; }
 
-    const dateFrom = from ? new Date(from as string) : undefined;
-    const dateTo = (() => {
-        if (!to) return undefined;
-        const d = new Date(to as string);
-        d.setHours(23, 59, 59, 999);
-        return d;
-    })();
+    const dateFrom = from ? new Date(`${from}T00:00:00.000`) : undefined;
+    const dateTo = to ? new Date(`${to}T23:59:59.999`) : undefined;
 
     try {
         const account = await prisma.account.findUnique({ where: { id: accountId } });
@@ -2668,12 +2651,8 @@ export const getSupplierBusinessReportPDF = async (req: Request, res: Response):
 export const getCashierSalesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to, userId } = req.query;
     const where: any = {};
-    if (from) where.createdAt = { ...where.createdAt, gte: new Date(from as string) };
-    if (to) {
-        const toDate = new Date(to as string);
-        toDate.setHours(23, 59, 59, 999);
-        where.createdAt = { ...where.createdAt, lte: toDate };
-    }
+    if (from) where.createdAt = { ...where.createdAt, gte: new Date(`${from}T00:00:00.000`) };
+    if (to) where.createdAt = { ...where.createdAt, lte: new Date(`${to}T23:59:59.999`) };
     if (userId) {
         where.userId = parseInt(userId as string);
     }

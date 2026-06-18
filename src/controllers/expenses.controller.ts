@@ -17,8 +17,8 @@ export const listExpenses = async (req: Request, res: Response): Promise<void> =
     if (req.query.userId) where.userId = parseInt(req.query.userId as string);
     if (req.query.from || req.query.to) {
         where.date = {};
-        if (req.query.from) where.date.gte = new Date(req.query.from as string);
-        if (req.query.to) where.date.lte = new Date(req.query.to as string);
+        if (req.query.from) where.date.gte = new Date(`${req.query.from}T00:00:00.000`);
+        if (req.query.to) where.date.lte = new Date(`${req.query.to}T23:59:59.999`);
     }
 
     try {

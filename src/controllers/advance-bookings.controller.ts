@@ -9,8 +9,8 @@ export const listAdvanceBookings = async (req: Request, res: Response): Promise<
     if (req.query.status) where.status = req.query.status;
     if (req.query.from || req.query.to) {
         where.deliveryDate = {};
-        if (req.query.from) where.deliveryDate.gte = new Date(req.query.from as string);
-        if (req.query.to) where.deliveryDate.lte = new Date(req.query.to as string);
+        if (req.query.from) where.deliveryDate.gte = new Date(`${req.query.from}T00:00:00.000`);
+        if (req.query.to) where.deliveryDate.lte = new Date(`${req.query.to}T23:59:59.999`);
     }
 
     try {

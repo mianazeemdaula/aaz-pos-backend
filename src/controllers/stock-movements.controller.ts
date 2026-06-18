@@ -11,8 +11,8 @@ export const listStockMovements = async (req: Request, res: Response): Promise<v
     if (req.query.type) where.type = req.query.type;
     if (req.query.from || req.query.to) {
         where.createdAt = {};
-        if (req.query.from) where.createdAt.gte = new Date(req.query.from as string);
-        if (req.query.to) where.createdAt.lte = new Date(req.query.to as string);
+        if (req.query.from) where.createdAt.gte = new Date(`${req.query.from}T00:00:00.000`);
+        if (req.query.to) where.createdAt.lte = new Date(`${req.query.to}T23:59:59.999`);
     }
 
     try {
