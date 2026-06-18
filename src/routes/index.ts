@@ -22,6 +22,7 @@ import stockMovementsRouter from "./stock-movements.routes";
 import expensesRouter from "./expenses.routes";
 import settingsRouter from "./settings.routes";
 import taxSchedulesRouter from "./tax-schedules.routes";
+import importExportRouter from "./import-export.routes";
 
 const router = Router();
 
@@ -49,5 +50,6 @@ router.use("/held", authenticate, heldTransactionsRouter);
 router.use("/reports", authenticate, reportsRouter);
 router.use("/settings", authenticate, settingsRouter);
 router.use("/tax-schedules", authenticate, taxSchedulesRouter);
+router.use("/data", authenticate, importExportRouter);
 
 export default router;
