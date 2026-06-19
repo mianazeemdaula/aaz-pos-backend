@@ -102,54 +102,56 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
 
         const variantMap = new Map(variants.map((v) => [v.id, v]));
 
-        // Check cost price and discount limit
-        for (const item of items) {
-            const variant = variantMap.get(item.variantId)!;
-            const unitPrice = Number(item.unitPrice);
-            const itemDiscount = Number(item.discount ?? 0);
-            const netPrice = unitPrice - itemDiscount;
-            const variantCostPrice = (variant.product.avgCostPrice ?? 0) * variant.factor;
+        // Check cost price and discount limit (skip for returns)
+        if (!isReturn) {
+            for (const item of items) {
+                const variant = variantMap.get(item.variantId)!;
+                const unitPrice = Number(item.unitPrice);
+                const itemDiscount = Number(item.discount ?? 0);
+                const netPrice = unitPrice - itemDiscount;
+                const variantCostPrice = (variant.product.avgCostPrice ?? 0) * variant.factor;
 
-            if (netPrice < 0) {
-                res.status(400).json({ error: `Discount cannot be more than the selling price for ${variant.product.name}` });
-                return;
+                if (netPrice < 0) {
+                    res.status(400).json({ error: `Discount cannot be more than the selling price for ${variant.product.name}` });
+                    return;
+                }
+
+                if (!variant.product.saleBelowCost && netPrice < variantCostPrice) {
+                    res.status(400).json({
+                        error: `Discount cannot make selling price below cost price for ${variant.product.name} (Cost: Rs ${variantCostPrice.toFixed(2)}, Discounted Price: Rs ${netPrice.toFixed(2)})`
+                    });
+                    return;
+                }
             }
 
-            if (!variant.product.saleBelowCost && netPrice < variantCostPrice) {
-                res.status(400).json({
-                    error: `Discount cannot make selling price below cost price for ${variant.product.name} (Cost: Rs ${variantCostPrice.toFixed(2)}, Discounted Price: Rs ${netPrice.toFixed(2)})`
-                });
-                return;
+            // Validate overall invoice discount limit
+            let totalCostOfNonBelowCostItems = 0;
+            let totalNetOfNonBelowCostItems = 0;
+            let hasNonBelowCostItems = false;
+
+            for (const item of items) {
+                const variant = variantMap.get(item.variantId)!;
+                const unitPrice = Number(item.unitPrice);
+                const itemDiscount = Number(item.discount ?? 0);
+                const qty = Number(item.qty);
+                const netPrice = unitPrice - itemDiscount;
+                const variantCostPrice = (variant.product.avgCostPrice ?? 0) * variant.factor;
+
+                if (!variant.product.saleBelowCost) {
+                    totalCostOfNonBelowCostItems += variantCostPrice * qty;
+                    totalNetOfNonBelowCostItems += netPrice * qty;
+                    hasNonBelowCostItems = true;
+                }
             }
-        }
 
-        // Validate overall invoice discount limit
-        let totalCostOfNonBelowCostItems = 0;
-        let totalNetOfNonBelowCostItems = 0;
-        let hasNonBelowCostItems = false;
-
-        for (const item of items) {
-            const variant = variantMap.get(item.variantId)!;
-            const unitPrice = Number(item.unitPrice);
-            const itemDiscount = Number(item.discount ?? 0);
-            const qty = Number(item.qty);
-            const netPrice = unitPrice - itemDiscount;
-            const variantCostPrice = (variant.product.avgCostPrice ?? 0) * variant.factor;
-
-            if (!variant.product.saleBelowCost) {
-                totalCostOfNonBelowCostItems += variantCostPrice * qty;
-                totalNetOfNonBelowCostItems += netPrice * qty;
-                hasNonBelowCostItems = true;
-            }
-        }
-
-        if (hasNonBelowCostItems) {
-            const maxOverallDiscount = totalNetOfNonBelowCostItems - totalCostOfNonBelowCostItems;
-            if (discount > maxOverallDiscount) {
-                res.status(400).json({
-                    error: `Overall invoice discount cannot exceed Rs ${maxOverallDiscount.toFixed(2)} (the margin above cost price for non-sale-below-cost items)`
-                });
-                return;
+            if (hasNonBelowCostItems) {
+                const maxOverallDiscount = totalNetOfNonBelowCostItems - totalCostOfNonBelowCostItems;
+                if (discount > maxOverallDiscount) {
+                    res.status(400).json({
+                        error: `Overall invoice discount cannot exceed Rs ${maxOverallDiscount.toFixed(2)} (the margin above cost price for non-sale-below-cost items)`
+                    });
+                    return;
+                }
             }
         }
 
