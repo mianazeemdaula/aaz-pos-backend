@@ -9,10 +9,10 @@ async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, 
 
     const [sp, cp, pp, ex, sup, sal, ea, trFrom, trTo] = await Promise.all([
         prisma.salePayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
-        prisma.customerPayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
+        prisma.customerPayment.groupBy({ by: ["accountId", "type"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.purchasePayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.expense.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
-        prisma.supplierPayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
+        prisma.supplierPayment.groupBy({ by: ["accountId", "type"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.salarySlip.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds }, status: "PAID" }, _sum: { netPayable: true } }),
         prisma.employeeAdvance.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.accountTransfer.groupBy({ by: ["fromAccountId"], where: { fromAccountId: { in: accountIds } }, _sum: { amount: true } }),
@@ -22,10 +22,18 @@ async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, 
     const balances = new Map<number, number>(accountIds.map(id => [id, 0]));
 
     for (const row of sp) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) + (row._sum.amount ?? 0));
-    for (const row of cp) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) + (row._sum.amount ?? 0));
+    for (const row of cp) {
+        const val = row._sum.amount ?? 0;
+        const change = row.type === "SENT" ? -val : val;
+        balances.set(row.accountId, (balances.get(row.accountId) ?? 0) + change);
+    }
     for (const row of pp) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.amount ?? 0));
     for (const row of ex) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.amount ?? 0));
-    for (const row of sup) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.amount ?? 0));
+    for (const row of sup) {
+        const val = row._sum.amount ?? 0;
+        const change = row.type === "RECEIVED" ? val : -val;
+        balances.set(row.accountId, (balances.get(row.accountId) ?? 0) + change);
+    }
     for (const row of sal) if (row.accountId != null) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.netPayable ?? 0));
     for (const row of ea) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) - (row._sum.amount ?? 0));
     // Account transfers: subtract from source, add to destination

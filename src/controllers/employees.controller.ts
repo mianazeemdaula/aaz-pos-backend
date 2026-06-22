@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import { getPaginationParams, createPaginatedResponse } from "../utils/pagination";
+import { computeEmployeeBalance } from "../utils/balance";
 
 // ---- EMPLOYEES ----
 
@@ -25,7 +26,16 @@ export const listEmployees = async (req: Request, res: Response): Promise<void> 
             }),
             prisma.employee.count({ where }),
         ]);
-        res.json(createPaginatedResponse(employees, total, page, pageSize));
+
+        // Compute balances for each employee from their ledger
+        const withBalances = await Promise.all(
+            employees.map(async (e) => ({
+                ...e,
+                balance: await computeEmployeeBalance(e.id),
+            }))
+        );
+
+        res.json(createPaginatedResponse(withBalances, total, page, pageSize));
     } catch {
         res.status(500).json({ error: "Failed to fetch employees" });
     }
@@ -43,7 +53,9 @@ export const getEmployee = async (req: Request, res: Response): Promise<void> =>
             },
         });
         if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
-        res.json(employee);
+
+        const balance = await computeEmployeeBalance(id);
+        res.json({ ...employee, balance });
     } catch {
         res.status(500).json({ error: "Failed to fetch employee" });
     }
@@ -65,7 +77,7 @@ export const createEmployee = async (req: Request, res: Response): Promise<void>
                 active: active ?? true,
             },
         });
-        res.status(201).json(employee);
+        res.status(201).json({ ...employee, balance: 0 });
     } catch (err: any) {
         console.error("createEmployee error:", err);
         res.status(500).json({ error: err?.message || "Failed to create employee" });
@@ -179,8 +191,6 @@ export const createEmployeeAdvance = async (req: Request, res: Response): Promis
             }
         }
 
-        const newBalance = employee.balance - amount;
-
         const [advance] = await prisma.$transaction([
             prisma.employeeAdvance.create({
                 data: { employeeId, amount, accountId, reason, month, year },
@@ -189,12 +199,11 @@ export const createEmployeeAdvance = async (req: Request, res: Response): Promis
             prisma.employeeLedger.create({
                 data: {
                     employeeId, type: "ADVANCE",
-                    amount, balance: newBalance,
+                    amount,
                     reference: `ADV-${Date.now()}`,
                     note: reason,
                 },
             }),
-            prisma.employee.update({ where: { id: employeeId }, data: { balance: newBalance } }),
         ]);
 
         res.status(201).json(advance);
@@ -236,12 +245,6 @@ export const rejectAdvance = async (req: Request, res: Response): Promise<void> 
             return;
         }
 
-        const employee = await prisma.employee.findUnique({ where: { id: advance.employeeId } });
-        if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
-
-        // Reverse the balance change
-        const newBalance = employee.balance + advance.amount;
-
         const [updated] = await prisma.$transaction([
             prisma.employeeAdvance.update({
                 where: { id: advanceId },
@@ -253,12 +256,10 @@ export const rejectAdvance = async (req: Request, res: Response): Promise<void> 
                     employeeId: advance.employeeId,
                     type: "ADJUSTMENT_CR",
                     amount: advance.amount,
-                    balance: newBalance,
                     reference: `ADV-REJECT-${advanceId}`,
                     note: "Advance rejected — reversed",
                 },
             }),
-            prisma.employee.update({ where: { id: advance.employeeId }, data: { balance: newBalance } }),
         ]);
 
         res.json(updated);
@@ -278,10 +279,6 @@ export const repayAdvance = async (req: Request, res: Response): Promise<void> =
             res.status(400).json({ error: `Cannot repay advance with status ${advance.status}` });
             return;
         }
-        const employee = await prisma.employee.findUnique({ where: { id: advance.employeeId } });
-        if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
-
-        const newBalance = employee.balance + advance.amount;
 
         const [updated] = await prisma.$transaction([
             prisma.employeeAdvance.update({
@@ -294,12 +291,10 @@ export const repayAdvance = async (req: Request, res: Response): Promise<void> =
                     employeeId: advance.employeeId,
                     type: "ADVANCE_REPAID",
                     amount: advance.amount,
-                    balance: newBalance,
                     reference: `ADV-REPAY-${advanceId}`,
                     note: `Advance repaid`,
                 },
             }),
-            prisma.employee.update({ where: { id: advance.employeeId }, data: { balance: newBalance } }),
         ]);
 
         res.json(updated);
@@ -317,10 +312,6 @@ export const waiveAdvance = async (req: Request, res: Response): Promise<void> =
             res.status(400).json({ error: `Cannot waive advance with status ${advance.status}` });
             return;
         }
-        const employee = await prisma.employee.findUnique({ where: { id: advance.employeeId } });
-        if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
-
-        const newBalance = employee.balance + advance.amount;
 
         const [updated] = await prisma.$transaction([
             prisma.employeeAdvance.update({
@@ -333,12 +324,10 @@ export const waiveAdvance = async (req: Request, res: Response): Promise<void> =
                     employeeId: advance.employeeId,
                     type: "ADJUSTMENT_CR",
                     amount: advance.amount,
-                    balance: newBalance,
                     reference: `ADV-WAIVE-${advanceId}`,
                     note: "Advance waived off",
                 },
             }),
-            prisma.employee.update({ where: { id: advance.employeeId }, data: { balance: newBalance } }),
         ]);
 
         res.json(updated);

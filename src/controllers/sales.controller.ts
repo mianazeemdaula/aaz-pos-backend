@@ -233,30 +233,24 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                 });
             }
 
-            // Update customer balance if customerId provided and there's a balance due
+            // Create customer ledger entry if customerId provided and there's a balance due
             if (customerId) {
                 const amountDue = totalAmount - paidAmount;
                 if (amountDue !== 0) {
-                    const customer = await tx.customer.findUnique({ where: { id: customerId } });
-                    if (customer) {
-                        const newBalance = customer.balance + amountDue;
-                        await tx.customer.update({ where: { id: customerId }, data: { balance: newBalance } });
-                        const isReturnTx = amountDue < 0; // negative amountDue = customer gets credit
-                        const message = isReturnTx ? `Customer returned items worth Rs ${Math.abs(amountDue)}`
-                            : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Invoice # ${sale.id}`;
-                        await tx.customerLedger.create({
-                            data: {
-                                customerId,
-                                type: isReturnTx ? "SALE_RETURN" : "SALE",
-                                amount: Math.abs(amountDue),
-                                debit: isReturnTx ? 0 : Math.abs(amountDue),
-                                credit: isReturnTx ? Math.abs(amountDue) : 0,
-                                balance: newBalance,
-                                referenceId: sale.id,
-                                reference: message,
-                            },
-                        });
-                    }
+                    const isReturnTx = amountDue < 0;
+                    const message = isReturnTx ? `Customer returned items worth Rs ${Math.abs(amountDue)}`
+                        : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Invoice # ${sale.id}`;
+                    await tx.customerLedger.create({
+                        data: {
+                            customerId,
+                            type: isReturnTx ? "SALE_RETURN" : "SALE",
+                            amount: Math.abs(amountDue),
+                            debit: isReturnTx ? 0 : Math.abs(amountDue),
+                            credit: isReturnTx ? Math.abs(amountDue) : 0,
+                            referenceId: sale.id,
+                            reference: message,
+                        },
+                    });
                 }
             }
             return sale;
@@ -266,6 +260,75 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
     } catch (err) {
         console.error("Error creating sale:", err);
         res.status(500).json({ error: "Failed to create sale" });
+    }
+};
+
+export const updateSale = async (req: Request, res: Response): Promise<void> => {
+    const id = parseInt(req.params.id);
+    const { customerId, note, taxInvoiceId } = req.body;
+
+    try {
+        const sale = await prisma.sale.findUnique({ where: { id } });
+        if (!sale) {
+            res.status(404).json({ error: "Sale not found" });
+            return;
+        }
+
+        const result = await prisma.$transaction(async (tx) => {
+            const updateData: any = {};
+            if (note !== undefined) updateData.note = note;
+            if (taxInvoiceId !== undefined) updateData.taxInvoiceId = taxInvoiceId;
+
+            // Handle customer change with ledger transfer
+            if (customerId !== undefined && customerId !== sale.customerId) {
+                updateData.customerId = customerId ? Number(customerId) : null;
+
+                // Delete old customer's ledger entries for this sale
+                if (sale.customerId) {
+                    await tx.customerLedger.deleteMany({
+                        where: { customerId: sale.customerId, referenceId: sale.id },
+                    });
+                }
+
+                // Create new customer's ledger entries
+                if (customerId) {
+                    const amountDue = sale.totalAmount - sale.paidAmount;
+                    if (amountDue !== 0) {
+                        const isReturnTx = amountDue < 0;
+                        const message = isReturnTx
+                            ? `Customer returned items worth Rs ${Math.abs(amountDue)}`
+                            : `Bill amount Rs ${sale.totalAmount} with payments Rs ${sale.paidAmount} Invoice # ${sale.id}`;
+                        await tx.customerLedger.create({
+                            data: {
+                                customerId: Number(customerId),
+                                type: isReturnTx ? "SALE_RETURN" : "SALE",
+                                amount: Math.abs(amountDue),
+                                debit: isReturnTx ? 0 : Math.abs(amountDue),
+                                credit: isReturnTx ? Math.abs(amountDue) : 0,
+                                referenceId: sale.id,
+                                reference: message,
+                            },
+                        });
+                    }
+                }
+            }
+
+            const updated = await tx.sale.update({
+                where: { id },
+                data: updateData,
+                include: {
+                    items: true,
+                    customer: true,
+                    payments: { include: { account: true } },
+                },
+            });
+            return updated;
+        });
+
+        res.json(result);
+    } catch (err) {
+        console.error("Error updating sale:", err);
+        res.status(500).json({ error: "Failed to update sale" });
     }
 };
 

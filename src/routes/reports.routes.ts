@@ -16,6 +16,8 @@ import {
     getDailyReportPDF,
     getSupplierBusinessReportPDF,
     getCashierSalesReportPDF,
+    getCustomerDetailedSalesReportPDF,
+    getSupplierDetailedPurchasesReportPDF,
 } from "../controllers/reports.controller";
 
 const router = Router();
@@ -25,7 +27,9 @@ router.get("/dashboard", getDashboardStats);
 // PDF report endpoints
 router.get("/sales", getSalesReportPDF);
 router.get("/cashier-sales", getCashierSalesReportPDF);
+router.get("/detailed-sales", getCustomerDetailedSalesReportPDF);
 router.get("/purchases", getPurchasesReportPDF);
+router.get("/detailed-purchases", getSupplierDetailedPurchasesReportPDF);
 router.get("/inventory", getInventoryReportPDF);
 router.get("/expenses", getExpensesReportPDF);
 router.get("/customer-balances", getCustomerBalancesReportPDF);

@@ -96,18 +96,15 @@ export const generateSalarySlip = async (req: Request, res: Response): Promise<v
             }
 
             // Add ledger entry for salary earned
-            const newBalance = employee.balance + employee.baseSalary + bonus;
             await tx.employeeLedger.create({
                 data: {
                     employeeId, type: "SALARY",
                     amount: employee.baseSalary + bonus,
-                    balance: newBalance,
                     referenceId: slip.id,
                     reference: `SAL-${year}-${String(month).padStart(2, "0")}`,
                     note: `Salary for ${year}-${String(month).padStart(2, "0")}`,
                 },
             });
-            await tx.employee.update({ where: { id: employeeId }, data: { balance: newBalance } });
 
             return slip;
         });
@@ -167,17 +164,14 @@ export const paySalarySlip = async (req: Request, res: Response): Promise<void> 
             });
 
             // Ledger entry for salary disbursement
-            const newBalance = slip.employee.balance - slip.netPayable;
             await tx.employeeLedger.create({
                 data: {
                     employeeId: slip.employeeId, type: "SALARY_PAID",
                     amount: slip.netPayable,
-                    balance: newBalance,
                     referenceId: slip.id,
                     reference: `SAL-${slip.year}-${String(slip.month).padStart(2, "0")}`,
                 },
             });
-            await tx.employee.update({ where: { id: slip.employeeId }, data: { balance: newBalance } });
 
             return updated;
         });

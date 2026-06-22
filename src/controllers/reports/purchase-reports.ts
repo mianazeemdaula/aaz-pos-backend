@@ -9,6 +9,7 @@ import {
     generateQRBuffer,
     createPDFGenerator
 } from "./helpers";
+import { computeSupplierBalance } from "../../utils/balance";
 
 export const getPurchasesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to } = req.query;
@@ -199,10 +200,12 @@ export const getSupplierBusinessReportPDF = async (req: Request, res: Response):
             { text: "Standalone Payments", align: { x: "left", y: "center" } },
             { text: "Current Balance", align: { x: "left", y: "center" } },
         ]);
+        const currentBalance = await computeSupplierBalance(supplierId);
+
         summaryTable.row([
             { text: `Rs ${fmtCurrency(totalPaid)}`, align: { x: "left", y: "center" } },
             { text: `Rs ${fmtCurrency(totalPayments)}`, align: { x: "left", y: "center" } },
-            { text: `Rs ${fmtCurrency(supplier.balance)}`, align: { x: "left", y: "center" } },
+            { text: `Rs ${fmtCurrency(currentBalance)}`, align: { x: "left", y: "center" } },
         ]);
         summaryTable.end();
         pdfGen.moveDown(0.5);
@@ -311,5 +314,143 @@ export const getSupplierBusinessReportPDF = async (req: Request, res: Response):
     } catch (error) {
         console.error("Supplier business report PDF error:", error);
         res.status(500).json({ error: "Failed to generate supplier business report", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+};
+
+export const getSupplierDetailedPurchasesReportPDF = async (req: Request, res: Response): Promise<void> => {
+    const { from, to, supplierId } = req.query;
+    const where: any = {};
+    if (from) where.date = { ...where.date, gte: new Date(`${from}T00:00:00.000`) };
+    if (to) where.date = { ...where.date, lte: new Date(`${to}T23:59:59.999`) };
+    if (supplierId) {
+        where.supplierId = parseInt(supplierId as string);
+    }
+
+    try {
+        const purchases = await prisma.purchase.findMany({
+            where,
+            orderBy: { date: "desc" },
+            include: {
+                supplier: { select: { name: true } },
+                items: {
+                    include: {
+                        product: { select: { name: true } }
+                    }
+                },
+            },
+        });
+
+        const totalCost = purchases.reduce((s, p) => s + p.totalAmount, 0);
+        const totalPaid = purchases.reduce((s, p) => s + p.paidAmount, 0);
+        const totalDue = totalCost - totalPaid;
+        const totalDiscount = purchases.reduce((s, p) => s + p.discount, 0);
+        const totalTax = purchases.reduce((s, p) => s + p.taxAmount, 0);
+
+        const rows = purchases.map((p, i) => {
+            const itemLines = p.items.map(item => {
+                const name = item.product?.name || "Product";
+                return `${name} - ${item.quantity} x ${item.unitCost}`;
+            }).join("\n");
+
+            return {
+                sno: i + 1,
+                date: p.date,
+                supplier: p.supplier?.name ?? "N/A",
+                invoiceNo: p.invoiceNo ?? `PO-${p.id}`,
+                itemDetails: itemLines || "No items",
+                discount: p.discount,
+                tax: p.taxAmount,
+                total: p.totalAmount,
+                paid: p.paidAmount,
+                due: p.totalAmount - p.paidAmount,
+            };
+        });
+
+        let supName = "All";
+        if (supplierId) {
+            const s = await prisma.supplier.findUnique({ where: { id: parseInt(supplierId as string) }, select: { name: true } });
+            if (s) supName = s.name;
+        }
+
+        const purchQr = await generateQRBuffer(`Detailed Purchases Report | Supplier: ${supName} | Orders: ${purchases.length}`);
+        const pdfGen = createPDFGenerator(
+            pdfConfig("Detailed Purchases Report", "Detailed Supplier Purchases Summary", {
+                "From": from ? fmtDate(from as string) : "All Time",
+                "To": to ? fmtDate(to as string) : "Now",
+                "Supplier": supName,
+                "Total Orders": purchases.length,
+            }, "landscape", "A4", purchQr)
+        );
+        const doc = pdfGen.getDocument();
+
+        // Summary
+        doc.x = doc.page.margins.left;
+        const summaryTable = doc.table({
+            columnStyles: ["*", "*", "*", "*"],
+            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        });
+        summaryTable.row([
+            { text: "Total Cost", align: { x: "left", y: "center" } },
+            { text: "Total Discount", align: { x: "left", y: "center" } },
+            { text: "Total Tax", align: { x: "left", y: "center" } },
+            { text: "Total Due", align: { x: "left", y: "center" } },
+        ]);
+        summaryTable.row([
+            { text: fmtCurrency(totalCost), align: { x: "left", y: "center" } },
+            { text: fmtCurrency(totalDiscount), align: { x: "left", y: "center" } },
+            { text: fmtCurrency(totalTax), align: { x: "left", y: "center" } },
+            { text: fmtCurrency(totalDue), align: { x: "left", y: "center" } },
+        ]);
+        summaryTable.end();
+
+        pdfGen.moveDown(0.5);
+
+        // Purchases table — 10 columns
+        doc.x = doc.page.margins.left;
+        const table = doc.table({
+            columnStyles: [20, 80, 70, 100, 250, 50, 40, 60, 60, 70],
+            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 9, fontStyle: "bold" } : {},
+        });
+        table.row([
+            { text: "#", align: { x: "center", y: "center" } },
+            { text: "Date", align: { x: "center", y: "center" } },
+            { text: "Invoice No.", align: { x: "center", y: "center" } },
+            { text: "Supplier", align: { x: "left", y: "center" } },
+            { text: "Item Details (Product - Qty x Cost)", align: { x: "left", y: "center" } },
+            { text: "Discount", align: { x: "right", y: "center" } },
+            { text: "Tax", align: { x: "right", y: "center" } },
+            { text: "Total", align: { x: "right", y: "center" } },
+            { text: "Paid", align: { x: "right", y: "center" } },
+            { text: "Due", align: { x: "right", y: "center" } },
+        ]);
+        rows.forEach((row) => {
+            table.row([
+                { text: String(row.sno), align: { x: "center", y: "center" } },
+                { text: fmtDate(row.date, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
+                { text: row.invoiceNo, align: { x: "center", y: "center" } },
+                { text: row.supplier, align: { x: "left", y: "center" } },
+                { text: row.itemDetails, align: { x: "left", y: "center" } },
+                { text: fmtCurrency(row.discount), align: { x: "right", y: "center" } },
+                { text: fmtCurrency(row.tax), align: { x: "right", y: "center" } },
+                { text: fmtCurrency(row.total), align: { x: "right", y: "center" } },
+                { text: fmtCurrency(row.paid), align: { x: "right", y: "center" } },
+                { text: fmtCurrency(row.due), align: { x: "right", y: "center" } },
+            ]);
+        });
+        doc.fontSize(8);
+        table.row([
+            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
+            { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
+            { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
+            { text: fmtCurrency(totalCost), align: { x: "right", y: "center" } },
+            { text: fmtCurrency(totalPaid), align: { x: "right", y: "center" } },
+            { text: fmtCurrency(totalDue), align: { x: "right", y: "center" } },
+        ]);
+        table.end();
+
+        await pdfGen.sendToResponse(res, `detailed-purchases-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+    } catch (error) {
+        console.error("Detailed purchases report PDF error:", error);
+        res.status(500).json({ error: "Failed to generate detailed purchases report PDF", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };

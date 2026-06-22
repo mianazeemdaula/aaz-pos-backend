@@ -172,29 +172,23 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                 });
             }
 
-            // Update supplier balance
+            // Create supplier ledger entry if supplierId provided and there's a balance due
             if (supplierId) {
                 const amountDue = totalAmount - paidAmount;
                 if (amountDue !== 0) {
-                    const supplier = await tx.supplier.findUnique({ where: { id: supplierId } });
-                    if (supplier) {
-                        const newBalance = supplier.balance + amountDue;
-                        await tx.supplier.update({ where: { id: supplierId }, data: { balance: newBalance } });
-                        const message = amountDue < 0 ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
-                            : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Purchase Order # ${purchase.id}`;
-                        await tx.supplierLedger.create({
-                            data: {
-                                supplierId,
-                                type: "PURCHASE",
-                                amount: Math.abs(amountDue),
-                                debit: Math.abs(amountDue),
-                                credit: 0,
-                                balance: newBalance,
-                                referenceId: purchase.id,
-                                reference: message,
-                            },
-                        });
-                    }
+                    const message = amountDue < 0 ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
+                        : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Purchase Order # ${purchase.id}`;
+                    await tx.supplierLedger.create({
+                        data: {
+                            supplierId,
+                            type: "PURCHASE",
+                            amount: Math.abs(amountDue),
+                            debit: Math.abs(amountDue),
+                            credit: 0,
+                            referenceId: purchase.id,
+                            reference: message,
+                        },
+                    });
                 }
             }
             return purchase;
@@ -203,6 +197,74 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
         res.status(201).json(result);
     } catch (error) {
         res.status(500).json({ error: error instanceof Error ? error.message : "Failed to create purchase" });
+    }
+};
+
+export const updatePurchase = async (req: Request, res: Response): Promise<void> => {
+    const id = parseInt(req.params.id);
+    const { supplierId, note, invoiceNo } = req.body;
+
+    try {
+        const purchase = await prisma.purchase.findUnique({ where: { id } });
+        if (!purchase) {
+            res.status(404).json({ error: "Purchase not found" });
+            return;
+        }
+
+        const result = await prisma.$transaction(async (tx) => {
+            const updateData: any = {};
+            if (note !== undefined) updateData.note = note;
+            if (invoiceNo !== undefined) updateData.invoiceNo = invoiceNo;
+
+            // Handle supplier change with ledger transfer
+            if (supplierId !== undefined && supplierId !== purchase.supplierId) {
+                updateData.supplierId = supplierId ? Number(supplierId) : null;
+
+                // Delete old supplier's ledger entries for this purchase
+                if (purchase.supplierId) {
+                    await tx.supplierLedger.deleteMany({
+                        where: { supplierId: purchase.supplierId, referenceId: purchase.id },
+                    });
+                }
+
+                // Create new supplier's ledger entries
+                if (supplierId) {
+                    const amountDue = purchase.totalAmount - purchase.paidAmount;
+                    if (amountDue !== 0) {
+                        const message = amountDue < 0
+                            ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
+                            : `Bill amount Rs ${purchase.totalAmount} with payments Rs ${purchase.paidAmount} Purchase Order # ${purchase.id}`;
+                        await tx.supplierLedger.create({
+                            data: {
+                                supplierId: Number(supplierId),
+                                type: "PURCHASE",
+                                amount: Math.abs(amountDue),
+                                debit: Math.abs(amountDue),
+                                credit: 0,
+                                referenceId: purchase.id,
+                                reference: message,
+                            },
+                        });
+                    }
+                }
+            }
+
+            const updated = await tx.purchase.update({
+                where: { id },
+                data: updateData,
+                include: {
+                    items: true,
+                    supplier: true,
+                    payments: { include: { account: true } },
+                },
+            });
+            return updated;
+        });
+
+        res.json(result);
+    } catch (err) {
+        console.error("Error updating purchase:", err);
+        res.status(500).json({ error: "Failed to update purchase" });
     }
 };
 

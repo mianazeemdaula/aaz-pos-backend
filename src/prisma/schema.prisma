@@ -124,7 +124,6 @@ model Customer {
   phone       String?
   address     String?
   email       String?
-  balance     Float   @default(0) // Denormalized running balance. Positive = customer owes us
   creditLimit Float? // Max credit allowed (null = no limit)
   active      Boolean @default(true)
 
@@ -147,7 +146,7 @@ model CustomerLedger {
   amount      Float              @default(0) // Legacy — kept for backward compat
   debit       Float              @default(0) // Positive value when customer owes more
   credit      Float              @default(0) // Positive value when customer owes less
-  balance     Float // Running balance snapshot AFTER this entry
+
   referenceId Int? // FK to Sale / SaleReturn / CustomerPayment id
   reference   String? // Human-readable e.g. "INV-0042", "PMT-0010"
   note        String?
@@ -171,12 +170,13 @@ enum CustomerLedgerType {
 
 // Standalone payment received from a customer (not tied to a single invoice)
 model CustomerPayment {
-  id         Int      @id @default(autoincrement())
+  id         Int                 @id @default(autoincrement())
   customerId Int
   amount     Float
-  accountId  Int // Account that received the money (Cash, Bank, etc.)
+  type       CustomerPaymentType @default(RECEIVED)
+  accountId  Int // Account that received/paid the money (Cash, Bank, etc.)
   note       String?
-  date       DateTime @default(now())
+  date       DateTime            @default(now())
 
   customer Customer @relation(fields: [customerId], references: [id])
   account  Account  @relation(fields: [accountId], references: [id])
@@ -195,7 +195,6 @@ model Supplier {
   phone        String?
   address      String?
   email        String?
-  balance      Float   @default(0) // Denormalized running balance. Positive = we owe them
   bankDetails  String? // Bank account / IBAN for outgoing payments
   paymentTerms String? // e.g., "Net 30", "COD"
   taxId        String? // NTN / CNIC / VAT registration number
@@ -219,7 +218,7 @@ model SupplierLedger {
   amount      Float              @default(0) // Legacy — kept for backward compat
   debit       Float              @default(0) // Positive value when we owe supplier more
   credit      Float              @default(0) // Positive value when we owe supplier less
-  balance     Float // Running balance snapshot AFTER this entry
+
   referenceId Int? // FK to Purchase / PurchaseReturn / SupplierPayment id
   reference   String? // Human-readable e.g. "PO-0011", "PMT-0007"
   note        String?
@@ -242,12 +241,13 @@ enum SupplierLedgerType {
 
 // Standalone payment made to a supplier (not tied to a single PO)
 model SupplierPayment {
-  id         Int      @id @default(autoincrement())
+  id         Int                 @id @default(autoincrement())
   supplierId Int
   amount     Float
-  accountId  Int // Account that the money was paid from
+  type       SupplierPaymentType @default(SENT)
+  accountId  Int // Account that the money was paid from / received into
   note       String?
-  date       DateTime @default(now())
+  date       DateTime            @default(now())
 
   supplier Supplier @relation(fields: [supplierId], references: [id])
   account  Account  @relation(fields: [accountId], references: [id])
@@ -555,7 +555,6 @@ model Employee {
   designation  String? // e.g., "Cashier", "Store Manager"
   baseSalary   Float // Agreed monthly salary
   advanceLimit Float    @default(0) // Max total advance allowed at once (0 = no limit)
-  balance      Float    @default(0) // Denormalized. Positive = company owes employee, Negative = employee owes company
   active       Boolean  @default(true)
 
   user        User?             @relation(fields: [userId], references: [id])
@@ -571,16 +570,15 @@ model Employee {
 
 // ------------------------------------------------------------------
 // Every financial event that affects an employee's balance.
-// This is the single source of truth — never update Employee.balance
-// directly; always write a ledger entry and update balance atomically
-// inside a Prisma $transaction.
+// The ledger is the single source of truth — balance is computed at
+// runtime from the sum of ledger entries, never stored on the model.
 // ------------------------------------------------------------------
 model EmployeeLedger {
   id          Int                @id @default(autoincrement())
   employeeId  Int
   type        EmployeeLedgerType
   amount      Float // Always positive; direction determined by type
-  balance     Float // Running balance snapshot AFTER this entry
+
   referenceId Int? // FK to SalarySlip / EmployeeAdvance / Sale id
   reference   String? // Human-readable e.g. "SAL-2024-03", "ADV-0012", "INV-0055"
   note        String?
@@ -845,4 +843,14 @@ enum HeldStatus {
   HELD
   RESUMED
   CANCELLED
+}
+
+enum CustomerPaymentType {
+  RECEIVED
+  SENT
+}
+
+enum SupplierPaymentType {
+  SENT
+  RECEIVED
 }

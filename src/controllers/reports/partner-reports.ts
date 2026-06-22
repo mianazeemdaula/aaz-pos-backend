@@ -12,13 +12,24 @@ import {
     logoPath,
     readSettings
 } from "./helpers";
+import {
+    computeCustomerBalance,
+    computeSupplierBalance,
+    computeAllCustomerBalances,
+    computeAllSupplierBalances
+} from "../../utils/balance";
 
 export const getCustomerBalancesReportPDF = async (req: Request, res: Response): Promise<void> => {
     try {
-        const customers = await prisma.customer.findMany({
-            where: { active: true, balance: { not: 0 } },
-            orderBy: { balance: "desc" },
+        const activeCustomers = await prisma.customer.findMany({
+            where: { active: true },
         });
+
+        const balanceMap = await computeAllCustomerBalances();
+        const customers = activeCustomers
+            .map((c) => ({ ...c, balance: balanceMap.get(c.id) ?? 0 }))
+            .filter((c) => c.balance !== 0)
+            .sort((a, b) => b.balance - a.balance);
 
         const totalReceivable = customers.filter((c) => c.balance > 0).reduce((s, c) => s + c.balance, 0);
         const totalOverpaid = customers.filter((c) => c.balance < 0).reduce((s, c) => s + Math.abs(c.balance), 0);
@@ -106,10 +117,15 @@ export const getCustomerBalancesReportPDF = async (req: Request, res: Response):
 
 export const getSupplierBalancesReportPDF = async (req: Request, res: Response): Promise<void> => {
     try {
-        const suppliers = await prisma.supplier.findMany({
-            where: { active: true, balance: { not: 0 } },
-            orderBy: { balance: "desc" },
+        const activeSuppliers = await prisma.supplier.findMany({
+            where: { active: true },
         });
+
+        const balanceMap = await computeAllSupplierBalances();
+        const suppliers = activeSuppliers
+            .map((s) => ({ ...s, balance: balanceMap.get(s.id) ?? 0 }))
+            .filter((s) => s.balance !== 0)
+            .sort((a, b) => b.balance - a.balance);
 
         const totalPayable = suppliers.filter((s) => s.balance > 0).reduce((s, sup) => s + sup.balance, 0);
         const totalOverpaid = suppliers.filter((s) => s.balance < 0).reduce((s, sup) => s + Math.abs(sup.balance), 0);
@@ -212,20 +228,32 @@ export const getCustomerStatementPDF = async (req: Request, res: Response): Prom
             orderBy: { createdAt: "asc" },
         });
 
+        let openingBalance = 0;
+        if (from) {
+            const aggBefore = await prisma.customerLedger.aggregate({
+                where: {
+                    customerId,
+                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
+                },
+                _sum: { debit: true, credit: true },
+            });
+            openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
+        }
+
         // Determine debit/credit direction by type
         const debitTypes = ["SALE", "ADJUSTMENT_DR"];
-        let runningBalance = 0;
+        let runningBalance = openingBalance;
         const ledgerRows = ledgerEntries.map((entry) => {
             const isDebit = debitTypes.includes(entry.type);
             const debit = isDebit ? entry.amount : 0;
             const credit = !isDebit ? entry.amount : 0;
-            runningBalance = entry.balance;
-            return { ...entry, debit, credit, runningBalance: entry.balance };
+            runningBalance += debit - credit;
+            return { ...entry, debit, credit, runningBalance };
         });
 
         const totalDebit = ledgerRows.reduce((s, r) => s + r.debit, 0);
         const totalCredit = ledgerRows.reduce((s, r) => s + r.credit, 0);
-        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].runningBalance : customer.balance;
+        const closingBalance = runningBalance;
 
         // Total sales and payments in period
         const salesCount = ledgerEntries.filter((e) => e.type === "SALE").length;
@@ -380,18 +408,32 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
             orderBy: { createdAt: "asc" },
         });
 
+        let openingBalance = 0;
+        if (from) {
+            const aggBefore = await prisma.supplierLedger.aggregate({
+                where: {
+                    supplierId,
+                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
+                },
+                _sum: { debit: true, credit: true },
+            });
+            openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
+        }
+
         // Debit types increase what we owe; credit types decrease it
         const debitTypes = ["PURCHASE", "ADJUSTMENT_DR"];
+        let runningBalance = openingBalance;
         const ledgerRows = ledgerEntries.map((entry) => {
             const isDebit = debitTypes.includes(entry.type);
             const debit = isDebit ? entry.amount : 0;
             const credit = !isDebit ? entry.amount : 0;
-            return { ...entry, debit, credit, runningBalance: entry.balance };
+            runningBalance += debit - credit;
+            return { ...entry, debit, credit, runningBalance };
         });
 
         const totalDebit = ledgerRows.reduce((s, r) => s + r.debit, 0);
         const totalCredit = ledgerRows.reduce((s, r) => s + r.credit, 0);
-        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].runningBalance : supplier.balance;
+        const closingBalance = runningBalance;
 
         const purchasesCount = ledgerEntries.filter((e) => e.type === "PURCHASE").length;
         const paymentsCount = ledgerEntries.filter((e) => e.type === "PAYMENT").length;
@@ -548,25 +590,30 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
         // Calculate opening balance: balance of the last entry BEFORE the date range
         let openingBalance = 0;
         if (from) {
-            const lastBefore = await prisma.customerLedger.findFirst({
-                where: { customerId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
-                orderBy: { createdAt: "desc" },
+            const aggBefore = await prisma.customerLedger.aggregate({
+                where: {
+                    customerId,
+                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
+                },
+                _sum: { debit: true, credit: true },
             });
-            openingBalance = lastBefore ? lastBefore.balance : 0;
+            openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
         }
 
         const debitTypes = ["SALE", "ADJUSTMENT_DR"];
 
         let totalDebit = 0;
         let totalCredit = 0;
+        let runningBalance = openingBalance;
         const ledgerRows = entries.map((entry) => {
             const debit = entry.debit || (debitTypes.includes(entry.type) ? entry.amount : 0);
             const credit = entry.credit || (!debitTypes.includes(entry.type) ? entry.amount : 0);
             totalDebit += debit;
             totalCredit += credit;
-            return { ...entry, debit, credit };
+            runningBalance += debit - credit;
+            return { ...entry, debit, credit, balance: runningBalance };
         });
-        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : (from ? openingBalance : customer.balance);
+        const closingBalance = runningBalance;
 
         const reportFonts = fonts();
         const company = readSettings();
@@ -713,25 +760,30 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
         // Calculate opening balance: balance of the last entry BEFORE the date range
         let openingBalance = 0;
         if (from) {
-            const lastBefore = await prisma.supplierLedger.findFirst({
-                where: { supplierId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
-                orderBy: { createdAt: "desc" },
+            const aggBefore = await prisma.supplierLedger.aggregate({
+                where: {
+                    supplierId,
+                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
+                },
+                _sum: { debit: true, credit: true },
             });
-            openingBalance = lastBefore ? lastBefore.balance : 0;
+            openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
         }
 
         const debitTypes = ["PURCHASE", "ADJUSTMENT_DR"];
 
         let totalDebit = 0;
         let totalCredit = 0;
+        let runningBalance = openingBalance;
         const ledgerRows = entries.map((entry) => {
             const debit = entry.debit || (debitTypes.includes(entry.type) ? entry.amount : 0);
             const credit = entry.credit || (!debitTypes.includes(entry.type) ? entry.amount : 0);
             totalDebit += debit;
             totalCredit += credit;
-            return { ...entry, debit, credit };
+            runningBalance += debit - credit;
+            return { ...entry, debit, credit, balance: runningBalance };
         });
-        const closingBalance = ledgerRows.length > 0 ? ledgerRows[ledgerRows.length - 1].balance : (from ? openingBalance : supplier.balance);
+        const closingBalance = runningBalance;
 
         const reportFonts = fonts();
         const company = readSettings();

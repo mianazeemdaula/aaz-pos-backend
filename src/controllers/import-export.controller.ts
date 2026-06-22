@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
+import { computeAllCustomerBalances, computeAllSupplierBalances } from "../utils/balance";
 
 // ── CSV Helpers ──────────────────────────────────────────────────────────────
 
@@ -146,8 +147,9 @@ export const exportCategories = async (_req: Request, res: Response): Promise<vo
 export const exportCustomers = async (_req: Request, res: Response): Promise<void> => {
     try {
         const customers = await prisma.customer.findMany({ orderBy: { name: "asc" } });
+        const balanceMap = await computeAllCustomerBalances();
         const headers = ['name', 'phone', 'address', 'email', 'balance', 'creditLimit', 'active'];
-        const rows = customers.map(c => [c.name, c.phone, c.address, c.email, c.balance, c.creditLimit, c.active]);
+        const rows = customers.map(c => [c.name, c.phone, c.address, c.email, balanceMap.get(c.id) ?? 0, c.creditLimit, c.active]);
         sendCSV(res, 'customers', toCSV(headers, rows));
     } catch {
         res.status(500).json({ error: "Failed to export customers" });
@@ -157,8 +159,9 @@ export const exportCustomers = async (_req: Request, res: Response): Promise<voi
 export const exportSuppliers = async (_req: Request, res: Response): Promise<void> => {
     try {
         const suppliers = await prisma.supplier.findMany({ orderBy: { name: "asc" } });
+        const balanceMap = await computeAllSupplierBalances();
         const headers = ['name', 'phone', 'address', 'email', 'balance', 'bankDetails', 'paymentTerms', 'taxId', 'active'];
-        const rows = suppliers.map(s => [s.name, s.phone, s.address, s.email, s.balance, s.bankDetails, s.paymentTerms, s.taxId, s.active]);
+        const rows = suppliers.map(s => [s.name, s.phone, s.address, s.email, balanceMap.get(s.id) ?? 0, s.bankDetails, s.paymentTerms, s.taxId, s.active]);
         sendCSV(res, 'suppliers', toCSV(headers, rows));
     } catch {
         res.status(500).json({ error: "Failed to export suppliers" });
@@ -365,16 +368,29 @@ export const importCustomers = async (req: Request, res: Response): Promise<void
                 const existing = await prisma.customer.findFirst({ where: { name, phone } });
                 if (existing) { skipped++; continue; }
 
-                await prisma.customer.create({
-                    data: {
-                        name,
-                        phone,
-                        address: getCol(headers, row, 'address') || null,
-                        email: getCol(headers, row, 'email') || null,
-                        balance: parseFloat(getCol(headers, row, 'balance')) || 0,
-                        creditLimit: parseFloat(getCol(headers, row, 'creditlimit')) || null,
-                        active: getCol(headers, row, 'active') ? getCol(headers, row, 'active').toLowerCase() !== 'false' : true,
-                    },
+                const ob = parseFloat(getCol(headers, row, 'balance')) || 0;
+                await prisma.$transaction(async (tx) => {
+                    const c = await tx.customer.create({
+                        data: {
+                            name,
+                            phone,
+                            address: getCol(headers, row, 'address') || null,
+                            email: getCol(headers, row, 'email') || null,
+                            creditLimit: parseFloat(getCol(headers, row, 'creditlimit')) || null,
+                            active: getCol(headers, row, 'active') ? getCol(headers, row, 'active').toLowerCase() !== 'false' : true,
+                        },
+                    });
+                    if (ob !== 0) {
+                        await tx.customerLedger.create({
+                            data: {
+                                customerId: c.id,
+                                type: 'OPENING_BALANCE',
+                                debit: ob > 0 ? ob : 0,
+                                credit: ob < 0 ? Math.abs(ob) : 0,
+                                note: 'Opening balance',
+                            },
+                        });
+                    }
                 });
                 imported++;
             } catch (err: any) {
@@ -408,18 +424,31 @@ export const importSuppliers = async (req: Request, res: Response): Promise<void
                 const existing = await prisma.supplier.findFirst({ where: { name, phone } });
                 if (existing) { skipped++; continue; }
 
-                await prisma.supplier.create({
-                    data: {
-                        name,
-                        phone,
-                        address: getCol(headers, row, 'address') || null,
-                        email: getCol(headers, row, 'email') || null,
-                        balance: parseFloat(getCol(headers, row, 'balance')) || 0,
-                        bankDetails: getCol(headers, row, 'bankdetails') || null,
-                        paymentTerms: getCol(headers, row, 'paymentterms') || null,
-                        taxId: getCol(headers, row, 'taxid') || null,
-                        active: getCol(headers, row, 'active') ? getCol(headers, row, 'active').toLowerCase() !== 'false' : true,
-                    },
+                const ob = parseFloat(getCol(headers, row, 'balance')) || 0;
+                await prisma.$transaction(async (tx) => {
+                    const s = await tx.supplier.create({
+                        data: {
+                            name,
+                            phone,
+                            address: getCol(headers, row, 'address') || null,
+                            email: getCol(headers, row, 'email') || null,
+                            bankDetails: getCol(headers, row, 'bankdetails') || null,
+                            paymentTerms: getCol(headers, row, 'paymentterms') || null,
+                            taxId: getCol(headers, row, 'taxid') || null,
+                            active: getCol(headers, row, 'active') ? getCol(headers, row, 'active').toLowerCase() !== 'false' : true,
+                        },
+                    });
+                    if (ob !== 0) {
+                        await tx.supplierLedger.create({
+                            data: {
+                                supplierId: s.id,
+                                type: 'OPENING_BALANCE',
+                                debit: ob > 0 ? ob : 0,
+                                credit: ob < 0 ? Math.abs(ob) : 0,
+                                note: 'Opening balance',
+                            },
+                        });
+                    }
                 });
                 imported++;
             } catch (err: any) {
