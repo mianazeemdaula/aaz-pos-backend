@@ -61,7 +61,7 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 where: { accountId, ...tsRange("date") },
                 orderBy: { date: "asc" },
                 select: {
-                    id: true, amount: true, note: true, date: true,
+                    id: true, amount: true, note: true, date: true, type: true,
                     customer: { select: { name: true } }
                 },
             }),
@@ -69,7 +69,7 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 where: { accountId, ...tsRange("date") },
                 orderBy: { date: "asc" },
                 select: {
-                    id: true, amount: true, note: true, date: true,
+                    id: true, amount: true, note: true, date: true, type: true,
                     supplier: { select: { name: true } }
                 },
             }),
@@ -109,33 +109,36 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
         const entries: TxEntry[] = [];
 
         for (const sp of salePayments) {
+            const isRefund = sp.amount < 0;
             entries.push({
                 date: sp.createdAt,
-                type: "Sale Payment",
+                type: isRefund ? "Sale Refund" : "Sale Payment",
                 reference: `INV-${sp.saleId}`,
                 description: sp.sale.customer?.name ?? "Walk-in",
-                debit: sp.amount,  // money in
-                credit: 0,
+                debit: isRefund ? 0 : sp.amount,
+                credit: isRefund ? Math.abs(sp.amount) : 0,
             });
         }
         for (const cp of customerPayments) {
+            const isSent = cp.type === "SENT";
             entries.push({
                 date: cp.date,
-                type: "Customer Payment",
+                type: isSent ? "Customer Refund" : "Customer Payment",
                 reference: `CUST-PMT-${cp.id}`,
                 description: cp.customer.name + (cp.note ? ` — ${cp.note}` : ""),
-                debit: cp.amount,
-                credit: 0,
+                debit: isSent ? 0 : cp.amount,
+                credit: isSent ? cp.amount : 0,
             });
         }
         for (const sp of supplierPayments) {
+            const isReceived = sp.type === "RECEIVED";
             entries.push({
                 date: sp.date,
-                type: "Supplier Payment",
+                type: isReceived ? "Supplier Refund" : "Supplier Payment",
                 reference: `SUPP-PMT-${sp.id}`,
                 description: sp.supplier.name + (sp.note ? ` — ${sp.note}` : ""),
-                debit: 0,
-                credit: sp.amount,  // money out
+                debit: isReceived ? sp.amount : 0,
+                credit: isReceived ? 0 : sp.amount,
             });
         }
         for (const p of purchases) {

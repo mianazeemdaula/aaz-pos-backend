@@ -403,6 +403,11 @@ model Sale {
   items        SaleItem[]
   payments     SalePayment[] // Split payments across multiple accounts
 
+  // Self relation for tracking returns
+  parentSaleId Int?          @map("parent_sale_id")
+  parentSale   Sale?         @relation("SaleReturns", fields: [parentSaleId], references: [id], onDelete: Restrict)
+  returns      Sale[]        @relation("SaleReturns")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

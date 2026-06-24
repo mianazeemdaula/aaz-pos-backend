@@ -47,6 +47,13 @@ export const getSale = async (req: Request, res: Response): Promise<void> => {
                 user: { select: { id: true, name: true, username: true } },
                 items: { include: { variant: { include: { product: true } } } },
                 payments: { include: { account: true } },
+                parentSale: { select: { id: true, taxInvoiceId: true } },
+                returns: {
+                    include: {
+                        items: { include: { variant: { include: { product: true } } } },
+                        payments: { include: { account: true } }
+                    }
+                }
             },
         });
         if (!sale) { res.status(404).json({ error: "Sale not found" }); return; }
@@ -60,6 +67,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
     const {
         customerId, items, payments,
         discount = 0, taxAmount = 0,
+        parentSaleId,
     } = req.body;
     const userId = req.user?.id;
     if (!items?.length) {
@@ -70,6 +78,65 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
     if (!isReturn && !payments?.length && !customerId) {
         res.status(400).json({ error: "payments or customerId is required for sales" });
         return;
+    }
+
+    const parsedParentSaleId = parentSaleId ? Number(parentSaleId) : null;
+
+    if (isReturn) {
+        if (!parsedParentSaleId) {
+            res.status(400).json({ error: "Original sale reference (parentSaleId) is required for returns" });
+            return;
+        }
+        if (!customerId && !payments?.length) {
+            res.status(400).json({ error: "Refund payment account is required for walking customer returns" });
+            return;
+        }
+    }
+
+    if (parsedParentSaleId) {
+        try {
+            const parentSale = await prisma.sale.findUnique({
+                where: { id: parsedParentSaleId },
+                include: {
+                    items: { include: { variant: { include: { product: true } } } },
+                    returns: { include: { items: true } },
+                },
+            });
+            if (!parentSale) {
+                res.status(404).json({ error: "Original sale not found" });
+                return;
+            }
+            if (parentSale.totalAmount < 0) {
+                res.status(400).json({ error: "Cannot create a return against a return transaction" });
+                return;
+            }
+            for (const item of items) {
+                const parentItem = parentSale.items.find(i => i.variantId === item.variantId);
+                if (!parentItem) {
+                    res.status(400).json({ error: `Variant ID ${item.variantId} was not purchased in the original sale #${parsedParentSaleId}` });
+                    return;
+                }
+                let alreadyReturned = 0;
+                for (const priorReturn of parentSale.returns) {
+                    const priorItem = priorReturn.items.find(pi => pi.variantId === item.variantId);
+                    if (priorItem) {
+                        alreadyReturned += Math.abs(priorItem.quantity);
+                    }
+                }
+                const remaining = parentItem.quantity - alreadyReturned;
+                const requested = Math.abs(Number(item.qty));
+                if (requested > remaining) {
+                    res.status(400).json({
+                        error: `Cannot return ${requested} units of ${parentItem.variant.product.name}. Max returnable quantity is ${remaining} (Original: ${parentItem.quantity}, Already returned: ${alreadyReturned})`
+                    });
+                    return;
+                }
+            }
+        } catch (err) {
+            console.error("Error validating parent sale:", err);
+            res.status(500).json({ error: "Failed to validate original sale" });
+            return;
+        }
     }
 
     for (const item of items) {
@@ -164,7 +231,30 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
         }, 0) - discount + taxAmount;
 
         const paidAmount = payments.reduce((sum: number, p: any) => sum + p.amount, 0);
-        const changeAmount = Math.max(0, paidAmount - totalAmount);
+        const changeAmount = isReturn ? 0 : Math.max(0, paidAmount - totalAmount);
+        const netPaidAmount = paidAmount - changeAmount;
+
+        // Distribute changeAmount across payment legs (deducting from the largest payment leg first)
+        let remainingChange = changeAmount;
+        const deductions = new Array(payments.length).fill(0);
+        if (changeAmount > 0) {
+            const paymentIndices = payments
+                .map((p: any, idx: number) => ({ amount: p.amount, idx }))
+                .sort((a: any, b: any) => b.amount - a.amount);
+
+            for (const item of paymentIndices) {
+                const ded = Math.min(item.amount, remainingChange);
+                deductions[item.idx] = ded;
+                remainingChange -= ded;
+            }
+        }
+
+        const adjustedPayments = payments.map((p: any, idx: number) => ({
+            accountId: p.accountId,
+            amount: p.amount - deductions[idx],
+            changeAmount: deductions[idx],
+            note: p.note,
+        }));
 
         const result = await prisma.$transaction(async (tx) => {
             // Create Sale
@@ -173,10 +263,11 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                     customerId: customerId ? Number(customerId) : null,
                     userId: userId ?? null,
                     totalAmount,
-                    paidAmount,
+                    paidAmount: netPaidAmount,
                     taxAmount,
                     discount,
                     changeAmount,
+                    parentSaleId: parsedParentSaleId,
                     items: {
                         create: items.map((item: any) => {
                             const variant = variantMap.get(item.variantId)!;
@@ -197,12 +288,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                         }),
                     },
                     payments: {
-                        create: payments.map((p: any) => ({
-                            accountId: p.accountId,
-                            amount: p.amount,
-                            changeAmount: changeAmount ?? 0,
-                            note: p.note,
-                        })),
+                        create: adjustedPayments,
                     },
                 },
                 include: {
@@ -235,11 +321,11 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
 
             // Create customer ledger entry if customerId provided and there's a balance due
             if (customerId) {
-                const amountDue = totalAmount - paidAmount;
+                const amountDue = totalAmount - netPaidAmount;
                 if (amountDue !== 0) {
                     const isReturnTx = amountDue < 0;
                     const message = isReturnTx ? `Customer returned items worth Rs ${Math.abs(amountDue)}`
-                        : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Invoice # ${sale.id}`;
+                        : `Bill amount Rs ${totalAmount} with payments Rs ${netPaidAmount} Invoice # ${sale.id}`;
                     await tx.customerLedger.create({
                         data: {
                             customerId,
