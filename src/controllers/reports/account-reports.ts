@@ -44,7 +44,7 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
             salePayments,
             customerPayments,
             supplierPayments,
-            purchases,
+            purchasePayments,
             expenses,
             salarySlips,
             employeeAdvances,
@@ -73,12 +73,12 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                     supplier: { select: { name: true } }
                 },
             }),
-            prisma.purchase.findMany({
-                where: { accountId, ...tsRange("date") },
-                orderBy: { date: "asc" },
+            prisma.purchasePayment.findMany({
+                where: { accountId, ...tsRange("createdAt") },
+                orderBy: { createdAt: "asc" },
                 select: {
-                    id: true, invoiceNo: true, totalAmount: true, paidAmount: true, note: true, date: true,
-                    supplier: { select: { name: true } }
+                    id: true, purchaseId: true, amount: true, note: true, createdAt: true,
+                    purchase: { select: { id: true, invoiceNo: true, supplier: { select: { name: true } } } }
                 },
             }),
             prisma.expense.findMany({
@@ -141,14 +141,15 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 credit: isReceived ? 0 : sp.amount,
             });
         }
-        for (const p of purchases) {
+        for (const pp of purchasePayments) {
+            const isRefund = pp.amount < 0;
             entries.push({
-                date: p.date,
-                type: "Purchase",
-                reference: p.invoiceNo ?? `PO-${p.id}`,
-                description: p.supplier?.name ?? "N/A",
-                debit: 0,
-                credit: p.paidAmount,  // money out
+                date: pp.createdAt,
+                type: isRefund ? "Purchase Refund" : "Purchase Payment",
+                reference: pp.purchase.invoiceNo ?? `PO-${pp.purchaseId}`,
+                description: pp.purchase.supplier?.name ?? "N/A",
+                debit: isRefund ? Math.abs(pp.amount) : 0,  // money in if refund
+                credit: isRefund ? 0 : pp.amount,           // money out if payment
             });
         }
         for (const ex of expenses) {

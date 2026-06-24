@@ -48,6 +48,13 @@ export const getPurchase = async (req: Request, res: Response): Promise<void> =>
                 account: true,
                 payments: { include: { account: true } },
                 items: { include: { product: true } },
+                parentPurchase: { select: { id: true, invoiceNo: true } },
+                returns: {
+                    include: {
+                        items: { include: { product: true } },
+                        payments: { include: { account: true } }
+                    }
+                }
             },
         });
         if (!purchase) { res.status(404).json({ error: "Purchase not found" }); return; }
@@ -63,6 +70,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
         discount = 0, taxAmount = 0, expenses = 0, date,
         paidAmount: rawPaidAmount,
         payments = [],
+        parentPurchaseId,
     } = req.body;
     const userId = req.user?.id;
 
@@ -74,6 +82,71 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
 
 
     try {
+        if (!items?.length) {
+            res.status(400).json({ error: "items are required" });
+            return;
+        }
+
+        const isReturn = items.every((i: any) => Number(i.quantity) < 0);
+        const parsedParentPurchaseId = parentPurchaseId ? Number(parentPurchaseId) : null;
+
+        if (isReturn) {
+            if (!parsedParentPurchaseId) {
+                res.status(400).json({ error: "Original purchase reference (parentPurchaseId) is required for returns" });
+                return;
+            }
+            if (!supplierId && !payments?.length) {
+                res.status(400).json({ error: "Refund payment account is required for walking supplier returns" });
+                return;
+            }
+        }
+
+        if (parsedParentPurchaseId) {
+            try {
+                const parentPurchase = await prisma.purchase.findUnique({
+                    where: { id: parsedParentPurchaseId },
+                    include: {
+                        items: true,
+                        returns: { include: { items: true } },
+                    },
+                });
+                if (!parentPurchase) {
+                    res.status(404).json({ error: "Original purchase not found" });
+                    return;
+                }
+                if (parentPurchase.totalAmount < 0) {
+                    res.status(400).json({ error: "Cannot create a return against a return transaction" });
+                    return;
+                }
+                for (const item of items) {
+                    const parentItem = parentPurchase.items.find(i => i.productId === item.productId);
+                    if (!parentItem) {
+                        res.status(400).json({ error: `Product ID ${item.productId} was not purchased in the original purchase #${parsedParentPurchaseId}` });
+                        return;
+                    }
+                    let alreadyReturned = 0;
+                    for (const priorReturn of parentPurchase.returns) {
+                        const priorItem = priorReturn.items.find(pi => pi.productId === item.productId);
+                        if (priorItem) {
+                            alreadyReturned += Math.abs(priorItem.quantity);
+                        }
+                    }
+                    const remaining = parentItem.quantity - alreadyReturned;
+                    const requested = Math.abs(Number(item.quantity));
+                    if (requested > remaining) {
+                        res.status(400).json({
+                            error: `Cannot return ${requested} units of product ID ${item.productId}. Max returnable quantity is ${remaining} (Original: ${parentItem.quantity}, Already returned: ${alreadyReturned})`
+                        });
+                        return;
+                    }
+                }
+            } catch (err) {
+                console.error("Error validating parent purchase:", err);
+                res.status(500).json({ error: "Failed to validate original purchase" });
+                return;
+            }
+        }
+
         // Validate products
         const productIds: number[] = items.map((i: any) => i.productId);
         const products = await prisma.product.findMany({
@@ -116,6 +189,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                     invoiceNo, supplierId, accountId: primaryAccountId, userId,
                     totalAmount, paidAmount, discount, taxAmount, expenses,
                     date: purchaseDate,
+                    parentPurchaseId: parsedParentPurchaseId,
                     items: {
                         create: resolvedItems.map((item: any) => ({
                             productId: item.productId,
@@ -176,15 +250,16 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
             if (supplierId) {
                 const amountDue = totalAmount - paidAmount;
                 if (amountDue !== 0) {
-                    const message = amountDue < 0 ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
+                    const isReturnTx = amountDue < 0;
+                    const message = isReturnTx ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
                         : `Bill amount Rs ${totalAmount} with payments Rs ${paidAmount} Purchase Order # ${purchase.id}`;
                     await tx.supplierLedger.create({
                         data: {
                             supplierId,
-                            type: "PURCHASE",
+                            type: isReturnTx ? "PURCHASE_RETURN" : "PURCHASE",
                             amount: Math.abs(amountDue),
-                            debit: Math.abs(amountDue),
-                            credit: 0,
+                            debit: isReturnTx ? 0 : Math.abs(amountDue),
+                            credit: isReturnTx ? Math.abs(amountDue) : 0,
                             referenceId: purchase.id,
                             reference: message,
                         },
@@ -231,16 +306,17 @@ export const updatePurchase = async (req: Request, res: Response): Promise<void>
                 if (supplierId) {
                     const amountDue = purchase.totalAmount - purchase.paidAmount;
                     if (amountDue !== 0) {
-                        const message = amountDue < 0
+                        const isReturnTx = amountDue < 0;
+                        const message = isReturnTx
                             ? `Supplier returned items worth Rs ${Math.abs(amountDue)}`
                             : `Bill amount Rs ${purchase.totalAmount} with payments Rs ${purchase.paidAmount} Purchase Order # ${purchase.id}`;
                         await tx.supplierLedger.create({
                             data: {
                                 supplierId: Number(supplierId),
-                                type: "PURCHASE",
+                                type: isReturnTx ? "PURCHASE_RETURN" : "PURCHASE",
                                 amount: Math.abs(amountDue),
-                                debit: Math.abs(amountDue),
-                                credit: 0,
+                                debit: isReturnTx ? 0 : Math.abs(amountDue),
+                                credit: isReturnTx ? Math.abs(amountDue) : 0,
                                 referenceId: purchase.id,
                                 reference: message,
                             },

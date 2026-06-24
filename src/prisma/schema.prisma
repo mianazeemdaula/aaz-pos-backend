@@ -467,6 +467,11 @@ model Purchase {
   items    PurchaseItem[]
   payments PurchasePayment[] // Split payments across multiple accounts
 
+  // Self relation for tracking returns
+  parentPurchaseId Int?              @map("parent_purchase_id")
+  parentPurchase   Purchase?         @relation("PurchaseReturns", fields: [parentPurchaseId], references: [id], onDelete: Restrict)
+  returns          Purchase[]        @relation("PurchaseReturns")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
