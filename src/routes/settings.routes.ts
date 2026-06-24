@@ -4,7 +4,7 @@ import {
     getSettings, updateSettings, backupDatabase, restoreDatabase,
     getAppSettings, updateAppSettings,
     getUserSettings, updateUserSettings, getAllUsersSettings,
-    uploadLogo, getLogo,
+    uploadLogo, getLogo, deleteLogo,
 } from "../controllers/settings.controller";
 
 const router = Router();
@@ -26,6 +26,7 @@ router.post("/restore", restoreDatabase);
 // Logo
 router.post("/logo", logoUpload.single("logo"), uploadLogo);
 router.get("/logo", getLogo);
+router.delete("/logo", deleteLogo);
 
 // App settings (DB-stored)
 router.get("/app", getAppSettings);

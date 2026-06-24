@@ -191,6 +191,18 @@ export const getLogo = (_req: Request, res: Response): void => {
     }
 };
 
+export const deleteLogo = (_req: Request, res: Response): void => {
+    try {
+        if (fs.existsSync(LOGO_PATH)) {
+            fs.unlinkSync(LOGO_PATH);
+        }
+        res.json({ message: "Logo removed successfully" });
+    } catch (err) {
+        console.error("Delete logo error:", err);
+        res.status(500).json({ error: "Failed to remove logo" });
+    }
+};
+
 // ─── App Settings (DB-stored key/value) ──────────────────────────────────────
 
 export const getAppSettings = async (_req: Request, res: Response): Promise<void> => {
