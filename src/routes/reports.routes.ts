@@ -18,6 +18,7 @@ import {
     getCashierSalesReportPDF,
     getCustomerDetailedSalesReportPDF,
     getSupplierDetailedPurchasesReportPDF,
+    getPurchaseOrderRecommendationPDF,
 } from "../controllers/reports.controller";
 
 const router = Router();
@@ -30,6 +31,7 @@ router.get("/cashier-sales", getCashierSalesReportPDF);
 router.get("/detailed-sales", getCustomerDetailedSalesReportPDF);
 router.get("/purchases", getPurchasesReportPDF);
 router.get("/detailed-purchases", getSupplierDetailedPurchasesReportPDF);
+router.get("/purchase-order-recommendation", getPurchaseOrderRecommendationPDF);
 router.get("/inventory", getInventoryReportPDF);
 router.get("/expenses", getExpensesReportPDF);
 router.get("/customer-balances", getCustomerBalancesReportPDF);

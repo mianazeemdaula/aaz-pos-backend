@@ -7,7 +7,8 @@ import {
     fmtCurrency,
     pdfConfig,
     generateQRBuffer,
-    createPDFGenerator
+    createPDFGenerator,
+    safeAvgCost
 } from "./helpers";
 import { computeSupplierBalance } from "../../utils/balance";
 
@@ -452,5 +453,350 @@ export const getSupplierDetailedPurchasesReportPDF = async (req: Request, res: R
     } catch (error) {
         console.error("Detailed purchases report PDF error:", error);
         res.status(500).json({ error: "Failed to generate detailed purchases report PDF", message: error instanceof Error ? error.message : "Unknown error" });
+    }
+};
+
+async function getCategoryIdsRecursively(categoryId: number): Promise<number[]> {
+    const ids = [categoryId];
+    const subcats = await prisma.category.findMany({
+        where: { parentId: categoryId },
+        select: { id: true }
+    });
+    for (const sub of subcats) {
+        const subIds = await getCategoryIdsRecursively(sub.id);
+        ids.push(...subIds);
+    }
+    return ids;
+}
+
+export const getPurchaseOrderRecommendationPDF = async (req: Request, res: Response): Promise<void> => {
+    try {
+        req.setTimeout(120_000);
+
+        const from = req.query.from as string | undefined;
+        const to = req.query.to as string | undefined;
+        const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+        const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
+
+        // Default: last 30 days
+        const fromDate = from ? dayjs(from).startOf("day").toDate() : dayjs().subtract(30, "day").startOf("day").toDate();
+        const toDate = to ? dayjs(to).endOf("day").toDate() : dayjs().endOf("day").toDate();
+        const days = Math.max(1, dayjs(toDate).diff(dayjs(fromDate), "day") + 1);
+
+        const whereClause: any = { active: true, isService: false };
+        if (categoryId) {
+            const categoryIds = await getCategoryIdsRecursively(categoryId);
+            whereClause.categoryId = { in: categoryIds };
+        }
+        if (brandId) {
+            whereClause.brandId = brandId;
+        }
+
+        const products = await prisma.product.findMany({
+            where: whereClause,
+            select: {
+                id: true,
+                name: true,
+                totalStock: true,
+                reorderLevel: true,
+                avgCostPrice: true,
+                categoryId: true,
+                category: { select: { name: true } },
+                brand: { select: { name: true } },
+                variants: { select: { price: true, barcode: true }, take: 1 },
+            },
+            orderBy: { name: "asc" },
+        });
+
+        if (products.length === 0) {
+            const emptyQr = await generateQRBuffer(`PO Rec Report | No Products`);
+            const pdfGen = createPDFGenerator(
+                pdfConfig(
+                    "Purchase Order Recommendation Report",
+                    "Supplier & Quantity Recommendations based on Sales Velocity",
+                    { "Products": 0 },
+                    "landscape",
+                    "A4",
+                    emptyQr
+                )
+            );
+            const doc = pdfGen.getDocument();
+            doc.x = doc.page.margins.left;
+            doc.text("No products found matching filters.");
+            await pdfGen.sendToResponse(res, `purchase-order-recommendation-${dayjs().format("YYYY-MM-DD")}.pdf`);
+            return;
+        }
+
+        // 1. Fetch sales quantities of these products in the date range
+        const saleItems = await prisma.saleItem.findMany({
+            where: {
+                sale: {
+                    createdAt: {
+                        gte: fromDate,
+                        lte: toDate,
+                    },
+                },
+                variant: {
+                    productId: { in: products.map(p => p.id) }
+                }
+            },
+            select: {
+                quantity: true,
+                variant: {
+                    select: {
+                        productId: true,
+                        factor: true
+                    }
+                }
+            }
+        });
+
+        const salesByProductId: Record<number, number> = {};
+        for (const item of saleItems) {
+            const prodId = item.variant.productId;
+            const baseQty = item.quantity * (item.variant.factor || 1);
+            salesByProductId[prodId] = (salesByProductId[prodId] || 0) + baseQty;
+        }
+
+        // 2. Fetch historical purchase suppliers for each product (most recent first)
+        const purchaseItems = await prisma.purchaseItem.findMany({
+            where: {
+                productId: { in: products.map(p => p.id) }
+            },
+            select: {
+                productId: true,
+                purchase: {
+                    select: {
+                        date: true,
+                        supplier: {
+                            select: {
+                                id: true,
+                                name: true,
+                                phone: true
+                            }
+                        }
+                    }
+                }
+            },
+            orderBy: {
+                purchase: {
+                    date: "desc"
+                }
+            }
+        });
+
+        // Map product ID to their most recent supplier
+        const supplierByProductId: Record<number, { id: number; name: string; phone: string | null }> = {};
+        for (const item of purchaseItems) {
+            const prodId = item.productId;
+            if (item.purchase?.supplier && !supplierByProductId[prodId]) {
+                supplierByProductId[prodId] = item.purchase.supplier;
+            }
+        }
+
+        // 3. Category fallback supplier mapping
+        const categoryPurchaseItems = await prisma.purchaseItem.findMany({
+            where: {
+                product: {
+                    categoryId: { in: products.map(p => p.categoryId) }
+                }
+            },
+            select: {
+                product: { select: { categoryId: true } },
+                purchase: {
+                    select: {
+                        supplier: {
+                            select: {
+                                id: true,
+                                name: true,
+                                phone: true
+                            }
+                        }
+                    }
+                }
+            },
+            orderBy: {
+                purchase: {
+                    date: "desc"
+                }
+            }
+        });
+
+        const categorySuppliers: Record<number, { id: number; name: string; phone: string | null }> = {};
+        for (const item of categoryPurchaseItems) {
+            const catId = item.product.categoryId;
+            const sup = item.purchase.supplier;
+            if (sup && !categorySuppliers[catId]) {
+                categorySuppliers[catId] = sup;
+            }
+        }
+
+        // 4. Compute recommendation
+        const rows = products.map((product) => {
+            const currentStock = product.totalStock;
+            const reorderLevel = product.reorderLevel;
+            const soldBaseQty = salesByProductId[product.id] || 0;
+            const velocity = soldBaseQty / days;
+            
+            // Forecast is to cover the same length of period (days)
+            const forecastDemand = Math.round(velocity * days);
+            
+            // Need reorder?
+            const needsReorder = currentStock <= reorderLevel || currentStock < forecastDemand;
+            
+            // If needs reorder, build a healthy buffer (max of forecast or double reorder level)
+            const targetStock = Math.max(forecastDemand, reorderLevel * 2);
+            const recommendedQty = needsReorder ? Math.max(0, targetStock - currentStock) : 0;
+            
+            const cost = safeAvgCost(product.avgCostPrice, product.variants[0]?.price ?? 0);
+            const estCost = recommendedQty * cost;
+
+            // Get supplier
+            let recSupplier = supplierByProductId[product.id];
+            let supplierType = "Direct";
+            if (!recSupplier) {
+                recSupplier = categorySuppliers[product.categoryId];
+                supplierType = recSupplier ? "Category" : "N/A";
+            }
+
+            return {
+                id: product.id,
+                name: product.name,
+                category: product.category.name,
+                brand: product.brand?.name ?? "N/A",
+                barcode: product.variants[0]?.barcode ?? "—",
+                currentStock,
+                reorderLevel,
+                soldQty: soldBaseQty,
+                recommendedQty,
+                avgCost: cost,
+                estCost,
+                supplier: recSupplier ? `${recSupplier.name}${recSupplier.phone ? ` (${recSupplier.phone})` : ""}` : "No History",
+                supplierType
+            };
+        }).filter(row => row.recommendedQty > 0);
+
+        const totalInvestment = rows.reduce((s, r) => s + r.estCost, 0);
+        const totalQty = rows.reduce((s, r) => s + r.recommendedQty, 0);
+
+        const meta: Record<string, string | number> = {
+            "Products to Reorder": rows.length,
+            "Total Qty Recommended": totalQty,
+            "Est. Total Cost": fmtCurrency(totalInvestment),
+            "Analysis Period": `${fmtDate(fromDate)} to ${fmtDate(toDate)} (${days} days)`,
+        };
+
+        if (categoryId) {
+            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
+            if (cat) meta["Category"] = cat.name;
+        }
+        if (brandId) {
+            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
+            if (br) meta["Brand"] = br.name;
+        }
+
+        const reportQr = await generateQRBuffer(`PO Rec Report | Needing Reorder: ${rows.length} | Qty: ${totalQty} | Cost: ${fmtCurrency(totalInvestment)}`);
+        
+        const pdfGen = createPDFGenerator(
+            pdfConfig(
+                "Purchase Order Recommendation Report",
+                "Supplier & Quantity Recommendations based on Sales Velocity",
+                meta,
+                "landscape",
+                "A4",
+                reportQr
+            )
+        );
+        const doc = pdfGen.getDocument();
+
+        // Summary Cards
+        doc.x = doc.page.margins.left;
+        const summaryTable = doc.table({
+            columnStyles: ["*", "*", "*", "*"],
+            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        });
+        summaryTable.row([
+            { text: "Products to Order", align: { x: "left", y: "center" } },
+            { text: "Total Recommended Units", align: { x: "left", y: "center" } },
+            { text: "Estimated Investment", align: { x: "left", y: "center" } },
+            { text: "Velocity Lookback Period", align: { x: "left", y: "center" } },
+        ]);
+        summaryTable.row([
+            { text: rows.length.toString(), align: { x: "left", y: "center" } },
+            { text: totalQty.toString(), align: { x: "left", y: "center" } },
+            { text: fmtCurrency(totalInvestment), align: { x: "left", y: "center" } },
+            { text: `${days} Days`, align: { x: "left", y: "center" } },
+        ]);
+        summaryTable.end();
+
+        pdfGen.moveDown(0.5);
+
+        if (rows.length === 0) {
+            doc.x = doc.page.margins.left;
+            doc.fontSize(10).text("All products have sufficient stock levels based on sales velocity and reorder thresholds.", { align: "center" });
+        } else {
+            // Recommendations Table
+            doc.x = doc.page.margins.left;
+            const table = doc.table({
+                columnStyles: [20, "*", 70, 65, 70, 35, 40, 35, 40, 50, 60, 120],
+                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#1e293b", textColor: "#ffffff", fontSize: 9, fontStyle: "bold" } : {},
+            });
+            table.row([
+                { text: "#", align: { x: "center", y: "center" } },
+                { text: "Product Name", align: { x: "left", y: "center" } },
+                { text: "Barcode", align: { x: "center", y: "center" } },
+                { text: "Brand", align: { x: "left", y: "center" } },
+                { text: "Category", align: { x: "left", y: "center" } },
+                { text: "Stock", align: { x: "center", y: "center" } },
+                { text: "Reorder", align: { x: "center", y: "center" } },
+                { text: "Sales", align: { x: "center", y: "center" } },
+                { text: "Rec Qty", align: { x: "center", y: "center" } },
+                { text: "Avg Cost", align: { x: "right", y: "center" } },
+                { text: "Est Cost", align: { x: "right", y: "center" } },
+                { text: "Recommended Supplier", align: { x: "left", y: "center" } },
+            ]);
+
+            rows.forEach((row, i) => {
+                table.row([
+                    { text: String(i + 1), align: { x: "center", y: "center" } },
+                    { text: row.name, align: { x: "left", y: "center" } },
+                    { text: row.barcode, align: { x: "center", y: "center" } },
+                    { text: row.brand, align: { x: "left", y: "center" } },
+                    { text: row.category, align: { x: "left", y: "center" } },
+                    { text: String(row.currentStock), align: { x: "center", y: "center" } },
+                    { text: String(row.reorderLevel), align: { x: "center", y: "center" } },
+                    { text: String(row.soldQty), align: { x: "center", y: "center" } },
+                    { text: String(row.recommendedQty), align: { x: "center", y: "center" } },
+                    { text: fmtCurrency(row.avgCost), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(row.estCost), align: { x: "right", y: "center" } },
+                    { text: `${row.supplier} [${row.supplierType}]`, align: { x: "left", y: "center" } },
+                ]);
+            });
+
+            table.row([
+                { text: "Grand Total", colSpan: 8, align: { x: "justify", y: "center" } },
+                { text: String(totalQty), align: { x: "center", y: "center" } },
+                { text: "", align: { x: "center", y: "center" } },
+                { text: fmtCurrency(totalInvestment), align: { x: "right", y: "center" } },
+                { text: "", align: { x: "center", y: "center" } },
+            ]);
+            table.end();
+        }
+
+        generateSignatureSection(doc, {
+            signatures: [
+                { label: "Prepared By", name: "_________________", title: "Accountant" },
+                { label: "Approved By", name: "_________________", title: "Manager" },
+            ],
+            spacing: 30,
+            lineWidth: 120,
+            labelFont: { family: "Helvetica-Bold", size: 8 },
+            nameFont: { size: 9 },
+        });
+
+        await pdfGen.sendToResponse(res, `purchase-order-recommendation-${dayjs().format("YYYY-MM-DD")}.pdf`);
+    } catch (error) {
+        console.error("Purchase order recommendation PDF error:", error);
+        res.status(500).json({ error: "Failed to generate purchase order recommendation report", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };

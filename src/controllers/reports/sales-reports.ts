@@ -136,7 +136,7 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
         // Main transactions table — 10 columns
         doc.x = doc.page.margins.left;
         const table = doc.table({
-            columnStyles: [30, 80, "*", 80, 40, 60, 60, 70, 70, 70],
+            columnStyles: [30, 100, '*', 80, 40, 60, 60, 70, 70, 70],
             rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
         });
         table.row([

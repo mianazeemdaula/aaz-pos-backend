@@ -1,6 +1,6 @@
 export { getDashboardStats } from "./reports/dashboard";
 export { getSalesReportPDF, getCashierSalesReportPDF, getCustomerDetailedSalesReportPDF } from "./reports/sales-reports";
-export { getPurchasesReportPDF, getSupplierBusinessReportPDF, getSupplierDetailedPurchasesReportPDF } from "./reports/purchase-reports";
+export { getPurchasesReportPDF, getSupplierBusinessReportPDF, getSupplierDetailedPurchasesReportPDF, getPurchaseOrderRecommendationPDF } from "./reports/purchase-reports";
 export { getInventoryReportPDF, getStockReportPDF } from "./reports/inventory-reports";
 export { getExpensesReportPDF } from "./reports/expense-reports";
 export {

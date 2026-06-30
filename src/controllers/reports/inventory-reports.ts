@@ -10,13 +10,38 @@ import {
     safeAvgCost
 } from "./helpers";
 
+async function getCategoryIdsRecursively(categoryId: number): Promise<number[]> {
+    const ids = [categoryId];
+    const subcats = await prisma.category.findMany({
+        where: { parentId: categoryId },
+        select: { id: true }
+    });
+    for (const sub of subcats) {
+        const subIds = await getCategoryIdsRecursively(sub.id);
+        ids.push(...subIds);
+    }
+    return ids;
+}
+
 export const getInventoryReportPDF = async (req: Request, res: Response): Promise<void> => {
     try {
         // Set a longer timeout for large inventories
         req.setTimeout(120_000);
 
+        const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+        const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
+
+        const whereClause: any = { active: true };
+        if (categoryId) {
+            const categoryIds = await getCategoryIdsRecursively(categoryId);
+            whereClause.categoryId = { in: categoryIds };
+        }
+        if (brandId) {
+            whereClause.brandId = brandId;
+        }
+
         const products = await prisma.product.findMany({
-            where: { active: true },
+            where: whereClause,
             select: {
                 id: true,
                 name: true,
@@ -46,14 +71,25 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
             status: p.totalStock <= 0 ? "Out of Stock" : p.totalStock <= p.reorderLevel ? "Low Stock" : "OK",
         }));
 
+        const meta: Record<string, string | number> = {
+            "Total Products": products.length,
+            "Low Stock": lowStock.length,
+            "Out of Stock": outOfStock.length,
+            "Total Value": fmtCurrency(totalValue),
+        };
+
+        if (categoryId) {
+            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
+            if (cat) meta["Category"] = cat.name;
+        }
+        if (brandId) {
+            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
+            if (br) meta["Brand"] = br.name;
+        }
+
         const qr = await generateQRBuffer(`Inventory Report | ${dayjs().format("DD-MM-YYYY")} | Products: ${products.length} | Value: ${fmtCurrency(totalValue)}`);
         const pdfGen = createPDFGenerator(
-            pdfConfig("Inventory Report", "Product Stock Overview", {
-                "Total Products": products.length,
-                "Low Stock": lowStock.length,
-                "Out of Stock": outOfStock.length,
-                "Total Value": fmtCurrency(totalValue),
-            }, "landscape", "A4", qr)
+            pdfConfig("Inventory Report", "Product Stock Overview", meta, "landscape", "A4", qr)
         );
         const doc = pdfGen.getDocument();
 
@@ -129,9 +165,21 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
 
 export const getStockReportPDF = async (req: Request, res: Response): Promise<void> => {
     const filter = (req.query.filter as string) ?? "all"; // all | negative | low
+    const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+    const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
+
     try {
+        const whereClause: any = { active: true, isService: false };
+        if (categoryId) {
+            const categoryIds = await getCategoryIdsRecursively(categoryId);
+            whereClause.categoryId = { in: categoryIds };
+        }
+        if (brandId) {
+            whereClause.brandId = brandId;
+        }
+
         const products = await prisma.product.findMany({
-            where: { active: true, isService: false },
+            where: whereClause,
             orderBy: { name: "asc" },
             include: {
                 category: { select: { name: true } },
@@ -150,17 +198,28 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
         else if (filter === "low") { rows = lowStock; title = "Low Stock Report"; }
         else if (filter === "alert") { rows = [...negative, ...lowStock]; title = "Stock Alert Report"; }
 
+        const meta: Record<string, string | number> = {
+            "Total Products": rows.length,
+            "Negative Stock": negative.length,
+            "Low Stock": lowStock.length,
+            "Normal Stock": normal.length,
+            "Generated": fmtDate(new Date()),
+        };
+
+        if (categoryId) {
+            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
+            if (cat) meta["Category"] = cat.name;
+        }
+        if (brandId) {
+            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
+            if (br) meta["Brand"] = br.name;
+        }
+
         const stockQr = await generateQRBuffer(`${title} | Products: ${rows.length} | Negative: ${negative.length} | Low: ${lowStock.length}`);
         const pdfGen = createPDFGenerator(pdfConfig(
             title,
             "Inventory Stock Levels",
-            {
-                "Total Products": rows.length,
-                "Negative Stock": negative.length,
-                "Low Stock": lowStock.length,
-                "Normal Stock": normal.length,
-                "Generated": fmtDate(new Date()),
-            },
+            meta,
             "landscape",
             undefined,
             stockQr
