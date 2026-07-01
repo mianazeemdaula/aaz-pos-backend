@@ -54,6 +54,13 @@ export const generateSalarySlip = async (req: Request, res: Response): Promise<v
         return;
     }
 
+    const currentYear = new Date().getFullYear();
+    const currentMonth = new Date().getMonth() + 1;
+    if (year < currentYear || (year === currentYear && month < currentMonth)) {
+        res.status(400).json({ error: "Salary slip cannot be generated for a previous month" });
+        return;
+    }
+
     try {
         const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
         if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
@@ -63,15 +70,31 @@ export const generateSalarySlip = async (req: Request, res: Response): Promise<v
             where: { employeeId_year_month: { employeeId, year, month } },
         });
         if (existing) {
-            res.status(409).json({ error: "Salary slip already exists for this month" });
-            return;
+            if (existing.status === "CANCELLED") {
+                // Delete the cancelled slip and restore associated advances and ledger entries
+                await prisma.$transaction(async (tx) => {
+                    await tx.employeeAdvance.updateMany({
+                        where: { deductedIn: existing.id },
+                        data: { status: "APPROVED", deductedIn: null },
+                    });
+                    await tx.employeeLedger.deleteMany({
+                        where: { employeeId, referenceId: existing.id },
+                    });
+                    await tx.salarySlip.delete({
+                        where: { id: existing.id },
+                    });
+                });
+            } else {
+                res.status(409).json({ error: "Salary slip already exists for this month" });
+                return;
+            }
         }
 
-        // Get all PENDING or APPROVED advances for this employee for the given month/year
-        const pendingAdvances = await prisma.employeeAdvance.findMany({
-            where: { employeeId, status: { in: ["PENDING", "APPROVED"] }, month, year },
+        // Get all APPROVED advances for this employee for the given month/year
+        const approvedAdvances = await prisma.employeeAdvance.findMany({
+            where: { employeeId, status: "APPROVED", month, year },
         });
-        const totalAdvances = pendingAdvances.reduce((sum, a) => sum + a.amount, 0);
+        const totalAdvances = approvedAdvances.reduce((sum, a) => sum + a.amount, 0);
         const netPayable = employee.baseSalary + bonus - totalAdvances - otherDeductions;
 
         const result = await prisma.$transaction(async (tx) => {
@@ -87,10 +110,10 @@ export const generateSalarySlip = async (req: Request, res: Response): Promise<v
                 },
             });
 
-            // Mark all pending advances as DEDUCTED
-            if (pendingAdvances.length > 0) {
+            // Mark all approved advances as DEDUCTED
+            if (approvedAdvances.length > 0) {
                 await tx.employeeAdvance.updateMany({
-                    where: { id: { in: pendingAdvances.map((a) => a.id) } },
+                    where: { id: { in: approvedAdvances.map((a) => a.id) } },
                     data: { status: "DEDUCTED", deductedIn: slip.id },
                 });
             }
