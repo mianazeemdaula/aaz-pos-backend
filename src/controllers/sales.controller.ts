@@ -57,7 +57,8 @@ export const getSale = async (req: Request, res: Response): Promise<void> => {
             },
         });
         if (!sale) { res.status(404).json({ error: "Sale not found" }); return; }
-        res.json(sale);
+        const enriched = await enrichSaleWithCustomerBalances(sale);
+        res.json(enriched);
     } catch {
         res.status(500).json({ error: "Failed to fetch sale" });
     }
@@ -342,7 +343,8 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
             return sale;
         });
 
-        res.status(201).json(result);
+        const enriched = await enrichSaleWithCustomerBalances(result);
+        res.status(201).json(enriched);
     } catch (err) {
         console.error("Error creating sale:", err);
         res.status(500).json({ error: "Failed to create sale" });
@@ -446,4 +448,54 @@ export const deleteSale = async (req: Request, res: Response): Promise<void> => 
         res.status(500).json({ error: "Failed to delete sale" });
     }
 };
+
+async function enrichSaleWithCustomerBalances(sale: any) {
+    if (!sale || !sale.customer || !sale.customerId) return sale;
+
+    // Find the ledger entry for this sale
+    const ledgerEntry = await prisma.customerLedger.findFirst({
+        where: {
+            customerId: sale.customerId,
+            referenceId: sale.id,
+            type: { in: ["SALE", "SALE_RETURN"] }
+        }
+    });
+
+    let previousBalance = 0;
+    let newBalance = 0;
+
+    if (ledgerEntry) {
+        // Sum of all debits/credits created BEFORE this ledger entry
+        const aggBefore = await prisma.customerLedger.aggregate({
+            where: {
+                customerId: sale.customerId,
+                id: { lt: ledgerEntry.id }
+            },
+            _sum: { debit: true, credit: true }
+        });
+        previousBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
+        newBalance = previousBalance + (ledgerEntry.debit - ledgerEntry.credit);
+    } else {
+        // No ledger entry exists (meaning no balance due/fully paid),
+        // we can aggregate ledger entries created before the sale's createdAt
+        const aggBefore = await prisma.customerLedger.aggregate({
+            where: {
+                customerId: sale.customerId,
+                createdAt: { lt: sale.createdAt }
+            },
+            _sum: { debit: true, credit: true }
+        });
+        previousBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
+        newBalance = previousBalance;
+    }
+
+    // Attach to customer
+    sale.customer = {
+        ...sale.customer,
+        previousBalance,
+        newBalance
+    };
+
+    return sale;
+}
 

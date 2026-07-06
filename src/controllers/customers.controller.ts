@@ -307,7 +307,10 @@ export const listCustomerPayments = async (req: Request, res: Response): Promise
             }),
             prisma.customerPayment.count({ where: { customerId } }),
         ]);
-        res.json(createPaginatedResponse(payments, total, page, pageSize));
+        const enriched = await Promise.all(
+            payments.map(p => enrichPaymentWithCustomerBalances(p))
+        );
+        res.json(createPaginatedResponse(enriched, total, page, pageSize));
     } catch {
         res.status(500).json({ error: "Failed to fetch payments" });
     }
@@ -335,12 +338,12 @@ export const createCustomerPayment = async (req: Request, res: Response): Promis
             credit = Math.abs(amount);
         }
 
-        const [payment] = await prisma.$transaction([
-            prisma.customerPayment.create({
+        const payment = await prisma.$transaction(async (tx) => {
+            const createdPayment = await tx.customerPayment.create({
                 data: { customerId, amount: Math.abs(amount), type: pType, accountId, note, date: paymentDate },
                 include: { account: true },
-            }),
-            prisma.customerLedger.create({
+            });
+            await tx.customerLedger.create({
                 data: {
                     customerId,
                     type: pType === "SENT" ? "REFUND" : "PAYMENT",
@@ -348,13 +351,65 @@ export const createCustomerPayment = async (req: Request, res: Response): Promis
                     debit,
                     credit,
                     note,
-                    reference: `PMT-${Date.now()}`,
+                    referenceId: createdPayment.id,
+                    reference: `PMT-${createdPayment.id}`,
                 },
-            }),
-        ]);
-        res.status(201).json(payment);
+            });
+            return createdPayment;
+        });
+        const enriched = await enrichPaymentWithCustomerBalances(payment);
+        res.status(201).json(enriched);
     } catch (err) {
         console.error("Error creating customer payment:", err);
         res.status(500).json({ error: "Failed to create payment" });
     }
 };
+
+async function enrichPaymentWithCustomerBalances(payment: any) {
+    if (!payment || !payment.customerId) return payment;
+
+    // Find the ledger entry for this payment
+    const ledgerEntry = await prisma.customerLedger.findFirst({
+        where: {
+            customerId: payment.customerId,
+            referenceId: payment.id,
+            type: { in: ["PAYMENT", "REFUND"] }
+        }
+    });
+
+    let previousBalance = 0;
+    let newBalance = 0;
+
+    if (ledgerEntry) {
+        // Sum of all debits/credits created BEFORE or EQUAL to this ledger entry (to get newBalance)
+        const aggUpto = await prisma.customerLedger.aggregate({
+            where: {
+                customerId: payment.customerId,
+                id: { lte: ledgerEntry.id }
+            },
+            _sum: { debit: true, credit: true }
+        });
+        newBalance = (aggUpto._sum.debit ?? 0) - (aggUpto._sum.credit ?? 0);
+        previousBalance = newBalance - (ledgerEntry.debit - ledgerEntry.credit);
+    } else {
+        // Fallback: sum before/after the payment creation date
+        const aggUpto = await prisma.customerLedger.aggregate({
+            where: {
+                customerId: payment.customerId,
+                createdAt: { lte: payment.createdAt }
+            },
+            _sum: { debit: true, credit: true }
+        });
+        newBalance = (aggUpto._sum.debit ?? 0) - (aggUpto._sum.credit ?? 0);
+        
+        const debit = payment.type === "SENT" ? payment.amount : 0;
+        const credit = payment.type === "RECEIVED" ? payment.amount : 0;
+        previousBalance = newBalance - (debit - credit);
+    }
+
+    // Attach to payment
+    payment.previousBalance = previousBalance;
+    payment.newBalance = newBalance;
+
+    return payment;
+}
