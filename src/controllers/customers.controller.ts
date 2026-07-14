@@ -316,6 +316,27 @@ export const listCustomerPayments = async (req: Request, res: Response): Promise
     }
 };
 
+export const listAllCustomerPayments = async (req: Request, res: Response): Promise<void> => {
+    const { page, pageSize, skip } = getPaginationParams(req);
+    try {
+        const [payments, total] = await Promise.all([
+            prisma.customerPayment.findMany({
+                skip, take: pageSize,
+                orderBy: { createdAt: "desc" },
+                include: { account: true, customer: true },
+            }),
+            prisma.customerPayment.count(),
+        ]);
+        const enriched = await Promise.all(
+            payments.map(p => enrichPaymentWithCustomerBalances(p))
+        );
+        res.json(createPaginatedResponse(enriched, total, page, pageSize));
+    } catch (err) {
+        console.error("Error fetching all customer payments:", err);
+        res.status(500).json({ error: "Failed to fetch payments" });
+    }
+};
+
 export const createCustomerPayment = async (req: Request, res: Response): Promise<void> => {
     const customerId = parseInt(req.params.id);
     const { amount, accountId, note, date, type } = req.body;

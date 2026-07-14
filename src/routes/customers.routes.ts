@@ -2,12 +2,13 @@ import { Router } from "express";
 import {
     listCustomers, getCustomer, createCustomer, updateCustomer, deleteCustomer,
     listCustomerLedger, createCustomerLedgerEntry,
-    listCustomerPayments, createCustomerPayment,
+    listCustomerPayments, listAllCustomerPayments, createCustomerPayment,
 } from "../controllers/customers.controller";
 
 const router = Router();
 
 router.get("/", listCustomers);
+router.get("/payments", listAllCustomerPayments);
 router.get("/:id", getCustomer);
 router.post("/", createCustomer);
 router.put("/:id", updateCustomer);

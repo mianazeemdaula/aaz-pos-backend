@@ -2,12 +2,13 @@ import { Router } from "express";
 import {
     listSuppliers, getSupplier, createSupplier, updateSupplier, deleteSupplier,
     listSupplierLedger, createSupplierLedgerEntry,
-    listSupplierPayments, createSupplierPayment,
+    listSupplierPayments, listAllSupplierPayments, createSupplierPayment,
 } from "../controllers/suppliers.controller";
 
 const router = Router();
 
 router.get("/", listSuppliers);
+router.get("/payments", listAllSupplierPayments);
 router.get("/:id", getSupplier);
 router.post("/", createSupplier);
 router.put("/:id", updateSupplier);
