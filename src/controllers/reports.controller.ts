@@ -13,3 +13,4 @@ export {
 } from "./reports/partner-reports";
 export { getAccountStatementPDF } from "./reports/account-reports";
 export { getDailyReportPDF } from "./reports/daily-reports";
+export { getOverallBusinessReportPDF, getOverallPayablesReceivablesReportPDF } from "./reports/overall-business-report";

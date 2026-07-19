@@ -19,6 +19,8 @@ import {
     getCustomerDetailedSalesReportPDF,
     getSupplierDetailedPurchasesReportPDF,
     getPurchaseOrderRecommendationPDF,
+    getOverallBusinessReportPDF,
+    getOverallPayablesReceivablesReportPDF,
 } from "../controllers/reports.controller";
 
 const router = Router();
@@ -26,6 +28,8 @@ const router = Router();
 // JSON endpoints
 router.get("/dashboard", getDashboardStats);
 // PDF report endpoints
+router.get("/overall-business", getOverallBusinessReportPDF);
+router.get("/payables-receivables", getOverallPayablesReceivablesReportPDF);
 router.get("/sales", getSalesReportPDF);
 router.get("/cashier-sales", getCashierSalesReportPDF);
 router.get("/detailed-sales", getCustomerDetailedSalesReportPDF);

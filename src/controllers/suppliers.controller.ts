@@ -13,6 +13,8 @@ export const listSuppliers = async (req: Request, res: Response): Promise<void> 
             { name: { contains: q, mode: "insensitive" } },
             { phone: { contains: q, mode: "insensitive" } },
             { email: { contains: q, mode: "insensitive" } },
+            { city: { contains: q, mode: "insensitive" } },
+            { ntn: { contains: q, mode: "insensitive" } },
         ];
     }
     if (req.query.active !== undefined) where.active = req.query.active === "true";
@@ -96,14 +98,14 @@ export const getSupplier = async (req: Request, res: Response): Promise<void> =>
 };
 
 export const createSupplier = async (req: Request, res: Response): Promise<void> => {
-    const { name, phone, address, email, bankDetails, paymentTerms, taxId, openingBalance, openingBalanceType } = req.body;
+    const { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, openingBalance, openingBalanceType } = req.body;
     if (!name) { res.status(400).json({ error: "name is required" }); return; }
     try {
-        const obVal = typeof openingBalance === 'number' ? openingBalance : null;
-        if (obVal !== null && obVal !== 0) {
+        const obVal = typeof openingBalance === 'number' && !isNaN(openingBalance) ? openingBalance : (openingBalance != null ? Number(openingBalance) : null);
+        if (obVal !== null && obVal !== 0 && !isNaN(obVal)) {
             const supplier = await prisma.$transaction(async (tx) => {
                 const s = await tx.supplier.create({
-                    data: { name, phone, address, email, bankDetails, paymentTerms, taxId },
+                    data: { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId },
                 });
 
                 let debit = 0;
@@ -135,27 +137,28 @@ export const createSupplier = async (req: Request, res: Response): Promise<void>
             res.status(201).json({ ...supplier, balance });
         } else {
             const supplier = await prisma.supplier.create({
-                data: { name, phone, address, email, bankDetails, paymentTerms, taxId },
+                data: { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId },
             });
             res.status(201).json({ ...supplier, balance: 0 });
         }
-    } catch {
+    } catch (err) {
+        console.error("Error creating supplier:", err);
         res.status(500).json({ error: "Failed to create supplier" });
     }
 };
 
 export const updateSupplier = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, phone, address, email, bankDetails, paymentTerms, taxId, active, openingBalance, openingBalanceType } = req.body;
+    const { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, active, openingBalance, openingBalanceType } = req.body;
     try {
         const supplier = await prisma.$transaction(async (tx) => {
             const s = await tx.supplier.update({
                 where: { id },
-                data: { name, phone, address, email, bankDetails, paymentTerms, taxId, active },
+                data: { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, active },
             });
 
             if (openingBalance !== undefined) {
-                const obVal = typeof openingBalance === 'number' ? openingBalance : 0;
+                const obVal = typeof openingBalance === 'number' && !isNaN(openingBalance) ? openingBalance : (openingBalance != null ? (Number(openingBalance) || 0) : 0);
                 
                 // Find existing OPENING_BALANCE ledger entry
                 const existingOB = await tx.supplierLedger.findFirst({

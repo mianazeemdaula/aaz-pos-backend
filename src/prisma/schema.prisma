@@ -124,6 +124,9 @@ model Customer {
   phone       String?
   address     String?
   email       String?
+  city        String?
+  ntn         String?
+  cnic        String?
   creditLimit Float? // Max credit allowed (null = no limit)
   active      Boolean @default(true)
 
@@ -195,6 +198,9 @@ model Supplier {
   phone        String?
   address      String?
   email        String?
+  city         String?
+  ntn          String?
+  cnic         String?
   bankDetails  String? // Bank account / IBAN for outgoing payments
   paymentTerms String? // e.g., "Net 30", "COD"
   taxId        String? // NTN / CNIC / VAT registration number
