@@ -132,9 +132,13 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
 // ---- ACCOUNT TRANSFERS ----
 
 export const transferBetweenAccounts = async (req: Request, res: Response): Promise<void> => {
-    const { fromAccountId, toAccountId, amount, note } = req.body;
-    if (!fromAccountId || !toAccountId || !amount) {
-        res.status(400).json({ error: "fromAccountId, toAccountId and amount are required" });
+    const fromAccountId = Number(req.body.fromAccountId);
+    const toAccountId = Number(req.body.toAccountId);
+    const amount = Number(req.body.amount);
+    const note = req.body.note ? String(req.body.note).trim() : null;
+
+    if (!fromAccountId || isNaN(fromAccountId) || !toAccountId || isNaN(toAccountId) || !amount || isNaN(amount)) {
+        res.status(400).json({ error: "fromAccountId, toAccountId and amount are required and must be valid numbers" });
         return;
     }
     if (fromAccountId === toAccountId) {
@@ -161,8 +165,9 @@ export const transferBetweenAccounts = async (req: Request, res: Response): Prom
             },
         });
         res.status(201).json(transfer);
-    } catch {
-        res.status(500).json({ error: "Failed to create transfer" });
+    } catch (error) {
+        console.error("Transfer error:", error);
+        res.status(500).json({ error: "Failed to create transfer", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };
 

@@ -48,6 +48,8 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
             expenses,
             salarySlips,
             employeeAdvances,
+            transfersFrom,
+            transfersTo,
         ] = await Promise.all([
             prisma.salePayment.findMany({
                 where: { accountId, ...tsRange("createdAt") },
@@ -100,6 +102,22 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 select: {
                     id: true, amount: true, reason: true, date: true,
                     employee: { select: { name: true } }
+                },
+            }),
+            prisma.accountTransfer.findMany({
+                where: { fromAccountId: accountId, ...tsRange("createdAt") },
+                orderBy: { createdAt: "asc" },
+                select: {
+                    id: true, amount: true, note: true, createdAt: true,
+                    toAccount: { select: { name: true, code: true } }
+                },
+            }),
+            prisma.accountTransfer.findMany({
+                where: { toAccountId: accountId, ...tsRange("createdAt") },
+                orderBy: { createdAt: "asc" },
+                select: {
+                    id: true, amount: true, note: true, createdAt: true,
+                    fromAccount: { select: { name: true, code: true } }
                 },
             }),
         ]);
@@ -181,6 +199,26 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
                 description: ea.employee.name + (ea.reason ? ` — ${ea.reason}` : ""),
                 debit: 0,
                 credit: ea.amount,  // money out
+            });
+        }
+        for (const tf of transfersFrom) {
+            entries.push({
+                date: tf.createdAt,
+                type: "Transfer Out",
+                reference: `TRF-${tf.id}`,
+                description: `Transfer to ${tf.toAccount.name} (${tf.toAccount.code})` + (tf.note ? ` — ${tf.note}` : ""),
+                debit: 0,
+                credit: tf.amount,
+            });
+        }
+        for (const tt of transfersTo) {
+            entries.push({
+                date: tt.createdAt,
+                type: "Transfer In",
+                reference: `TRF-${tt.id}`,
+                description: `Transfer from ${tt.fromAccount.name} (${tt.fromAccount.code})` + (tt.note ? ` — ${tt.note}` : ""),
+                debit: tt.amount,
+                credit: 0,
             });
         }
         // Sort chronologically
