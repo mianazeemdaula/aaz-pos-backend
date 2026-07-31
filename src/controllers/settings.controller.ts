@@ -37,7 +37,7 @@ function decryptData(encrypted: string): string {
 }
 
 const DEFAULT_SETTINGS: Record<string, unknown> = {
-    businessName: "AAZ Point of Sale",
+    businessName: "Aazify POS",
     address: "",
     phone: "",
     ntn: "",
