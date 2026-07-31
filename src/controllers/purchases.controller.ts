@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
-import { getPaginationParams, createPaginatedResponse } from "../utils/pagination";
+import { getPaginationParams, createPaginatedResponse, round2 } from "../utils";
 
 export const listPurchases = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
@@ -165,11 +165,14 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
             return { ...item, quantity: effectiveQty, originalQty: item.quantity, factor };
         });
 
-        const totalAmount = resolvedItems.reduce((sum: number, item: any) => {
-            const itemDiscount = item.discount ?? 0;
-            const itemTax = item.taxAmount ?? 0;
-            return sum + (item.unitCost - itemDiscount) * item.originalQty + itemTax;
-        }, 0) - discount + taxAmount + expenses;
+        const totalAmount = round2(
+            resolvedItems.reduce((sum: number, item: any) => {
+                const itemDiscount = round2(item.discount ?? 0);
+                const itemTax = round2(item.taxAmount ?? 0);
+                const unitCost = round2(item.unitCost);
+                return round2(sum + round2((unitCost - itemDiscount) * item.originalQty) + itemTax);
+            }, 0) - round2(discount) + round2(taxAmount) + round2(expenses)
+        );
 
         // if amount not paid means there must be a supplier
         if (totalAmount != paidAmount && !supplierId) {
@@ -187,24 +190,34 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
             const purchase = await tx.purchase.create({
                 data: {
                     invoiceNo, supplierId, accountId: primaryAccountId, userId,
-                    totalAmount, paidAmount, discount, taxAmount, expenses,
+                    totalAmount,
+                    paidAmount: round2(paidAmount),
+                    discount: round2(discount),
+                    taxAmount: round2(taxAmount),
+                    expenses: round2(expenses),
                     date: purchaseDate,
                     parentPurchaseId: parsedParentPurchaseId,
                     items: {
-                        create: resolvedItems.map((item: any) => ({
-                            productId: item.productId,
-                            quantity: item.quantity,
-                            unitCost: item.unitCost / item.factor,
-                            sellingPrice: item.sellingPrice ?? 0,
-                            discount: item.discount ?? 0,
-                            taxAmount: item.taxAmount ?? 0,
-                            totalCost: ((item.unitCost - (item.discount ?? 0)) * item.originalQty) + (item.taxAmount ?? 0),
-                        })),
+                        create: resolvedItems.map((item: any) => {
+                            const unitCost = round2(item.unitCost / item.factor);
+                            const itemDiscount = round2(item.discount ?? 0);
+                            const itemTax = round2(item.taxAmount ?? 0);
+                            const totalCost = round2(((round2(item.unitCost) - itemDiscount) * item.originalQty) + itemTax);
+                            return {
+                                productId: item.productId,
+                                quantity: item.quantity,
+                                unitCost,
+                                sellingPrice: round2(item.sellingPrice ?? 0),
+                                discount: itemDiscount,
+                                taxAmount: itemTax,
+                                totalCost,
+                            };
+                        }),
                     },
                     payments: paymentEntries.length > 0 ? {
                         create: paymentEntries.map((p: { accountId: number; amount: number; note?: string }) => ({
                             accountId: p.accountId,
-                            amount: p.amount,
+                            amount: round2(p.amount),
                             note: p.note,
                         })),
                     } : undefined,
@@ -221,18 +234,19 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                 // Only update avg cost for incoming goods (positive qty)
                 let newAvgCost = product.avgCostPrice;
                 if (!isReturnItem) {
+                    const unitCostPerBaseUnit = round2(item.unitCost / item.factor);
                     if (product.totalStock > 0 && newTotalStock > 0) {
                         // Standard weighted average: only valid when base stock is positive
-                        newAvgCost = (product.avgCostPrice * product.totalStock + (item.unitCost / item.factor) * item.quantity) / newTotalStock;
+                        newAvgCost = round2((product.avgCostPrice * product.totalStock + unitCostPerBaseUnit * item.quantity) / newTotalStock);
                     } else {
                         // Base stock is zero/negative (oversold), or result is still non-positive.
-                        newAvgCost = item.unitCost / item.factor;
+                        newAvgCost = unitCostPerBaseUnit;
                     }
                 }
 
                 await tx.product.update({
                     where: { id: product.id },
-                    data: { totalStock: newTotalStock, avgCostPrice: newAvgCost },
+                    data: { totalStock: newTotalStock, avgCostPrice: round2(newAvgCost) },
                 });
 
                 await tx.stockMovement.create({

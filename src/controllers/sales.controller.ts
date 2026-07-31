@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
-import { getPaginationParams, createPaginatedResponse } from "../utils/pagination";
+import { getPaginationParams, createPaginatedResponse, round2 } from "../utils";
 
 export const listSales = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
@@ -223,37 +223,39 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
             }
         }
 
-        // Compute totals
-        const totalAmount = items.reduce((sum: number, item: any) => {
-            const unitPrice = Number(item.unitPrice);
-            const qty = Number(item.qty);
-            const itemDiscount = item.discount ?? 0;
-            return sum + (unitPrice - itemDiscount) * qty;
-        }, 0) - discount + taxAmount;
+        // Compute totals with max 2 decimal places precision
+        const totalAmount = round2(
+            items.reduce((sum: number, item: any) => {
+                const unitPrice = round2(Number(item.unitPrice));
+                const qty = Number(item.qty);
+                const itemDiscount = round2(Number(item.discount ?? 0));
+                return round2(sum + round2((unitPrice - itemDiscount) * qty));
+            }, 0) - round2(Number(discount)) + round2(Number(taxAmount))
+        );
 
-        const paidAmount = payments.reduce((sum: number, p: any) => sum + p.amount, 0);
-        const changeAmount = isReturn ? 0 : Math.max(0, paidAmount - totalAmount);
-        const netPaidAmount = paidAmount - changeAmount;
+        const paidAmount = round2(payments.reduce((sum: number, p: any) => sum + round2(Number(p.amount)), 0));
+        const changeAmount = isReturn ? 0 : round2(Math.max(0, paidAmount - totalAmount));
+        const netPaidAmount = round2(paidAmount - changeAmount);
 
         // Distribute changeAmount across payment legs (deducting from the largest payment leg first)
         let remainingChange = changeAmount;
         const deductions = new Array(payments.length).fill(0);
         if (changeAmount > 0) {
             const paymentIndices = payments
-                .map((p: any, idx: number) => ({ amount: p.amount, idx }))
+                .map((p: any, idx: number) => ({ amount: round2(Number(p.amount)), idx }))
                 .sort((a: any, b: any) => b.amount - a.amount);
 
             for (const item of paymentIndices) {
-                const ded = Math.min(item.amount, remainingChange);
+                const ded = round2(Math.min(item.amount, remainingChange));
                 deductions[item.idx] = ded;
-                remainingChange -= ded;
+                remainingChange = round2(remainingChange - ded);
             }
         }
 
         const adjustedPayments = payments.map((p: any, idx: number) => ({
             accountId: p.accountId,
-            amount: p.amount - deductions[idx],
-            changeAmount: deductions[idx],
+            amount: round2(p.amount - deductions[idx]),
+            changeAmount: round2(deductions[idx]),
             note: p.note,
         }));
 
@@ -265,16 +267,16 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                     userId: userId ?? null,
                     totalAmount,
                     paidAmount: netPaidAmount,
-                    taxAmount,
-                    discount,
+                    taxAmount: round2(Number(taxAmount)),
+                    discount: round2(Number(discount)),
                     changeAmount,
                     parentSaleId: parsedParentSaleId,
                     items: {
                         create: items.map((item: any) => {
                             const variant = variantMap.get(item.variantId)!;
-                            const unitPrice = Number(item.unitPrice);
+                            const unitPrice = round2(Number(item.unitPrice));
                             const qty = Number(item.qty);
-                            const itemDiscount = item.discount ?? 0;
+                            const itemDiscount = round2(Number(item.discount ?? 0));
                             const costPrice = (variant.product.avgCostPrice > 0 && Number.isFinite(variant.product.avgCostPrice) && variant.product.avgCostPrice < 1e9)
                                 ? variant.product.avgCostPrice
                                 : variant.price * 0.95; // Fallback if avgCostPrice not set or corrupted
@@ -283,8 +285,8 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                                 quantity: qty,
                                 unitPrice,
                                 discount: itemDiscount,
-                                totalPrice: (unitPrice - itemDiscount) * qty,
-                                avgCostPrice: costPrice * variant.factor, // Store avg cost at the variant level (cost price * factor)
+                                totalPrice: round2((unitPrice - itemDiscount) * qty),
+                                avgCostPrice: round2(costPrice * variant.factor), // Store avg cost at the variant level (cost price * factor)
                             };
                         }),
                     },
