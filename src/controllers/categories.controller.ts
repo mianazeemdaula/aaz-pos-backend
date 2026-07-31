@@ -14,7 +14,12 @@ export const listCategories = async (req: Request, res: Response): Promise<void>
         const categories = await prisma.category.findMany({
             where,
             orderBy: { name: "asc" },
-            include: { subcategories: true },
+            include: {
+                subcategories: {
+                    orderBy: { name: "asc" },
+                    include: { subcategories: { orderBy: { name: "asc" } } },
+                },
+            },
         });
         res.json(createPaginatedResponse(categories, categories.length, 1, categories.length));
     } catch {
