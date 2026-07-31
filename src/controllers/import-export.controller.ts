@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { round2 } from "../utils/number";
 import { prisma } from "../prisma/prisma";
 import { computeAllCustomerBalances, computeAllSupplierBalances } from "../utils/balance";
 
@@ -230,7 +231,7 @@ export const importProducts = async (req: Request, res: Response): Promise<void>
                             categoryId: category.id,
                             reorderLevel: parseInt(getCol(headers, row, 'reorderlevel')) || 10,
                             totalStock: parseInt(getCol(headers, row, 'totalstock')) || 0,
-                            avgCostPrice: parseFloat(getCol(headers, row, 'avgcostprice')) || 0,
+                            avgCostPrice: round2(parseFloat(getCol(headers, row, 'avgcostprice')) || 0),
                             allowNegative: getCol(headers, row, 'allownegative').toLowerCase() === 'true',
                             taxRate: parseFloat(getCol(headers, row, 'taxrate')) || 0,
                             taxMethod: (getCol(headers, row, 'taxmethod') as any) || 'EXCLUSIVE',

@@ -36,7 +36,7 @@ export function getPaginationParams(
 
   // Include any additional query parameters for filtering/sorting
   const pageSize = Math.min(
-    100,
+    10000,
     Math.max(1, parseInt(req.query.pageSize as string) || defaultPageSize),
   );
   const skip = (page - 1) * pageSize;

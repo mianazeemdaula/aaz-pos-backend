@@ -1,6 +1,7 @@
 import e, { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import { getPaginationParams, createPaginatedResponse } from "../utils/pagination";
+import { round2 } from "../utils/number";
 
 // ---- PRODUCTS ----
 
@@ -68,7 +69,7 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
         return;
     }
     try {
-        const initialCostPrice = costPrice !== undefined && costPrice !== null ? Number(costPrice) : (variants?.[0]?.price * 0.90 || 0);
+        const initialCostPrice = round2(costPrice !== undefined && costPrice !== null ? Number(costPrice) : (variants?.[0]?.price * 0.90 || 0));
 
         if (variants && Array.isArray(variants)) {
             const defaultV = variants.find((v: any) => v.isDefault) || variants[0];
@@ -89,7 +90,7 @@ export const createProduct = async (req: Request, res: Response): Promise<void> 
                     if (wholesale === 0) wholesale = price;
                 }
 
-                const variantCost = initialCostPrice * factor;
+                const variantCost = round2(initialCostPrice * factor);
 
                 if (price <= variantCost) {
                     res.status(400).json({ error: `Sale price (${price}) for variant '${v.name}' must be greater than its cost price (${variantCost})` });
@@ -180,7 +181,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
         }
 
         if (costPrice !== undefined && costPrice !== null) {
-            const newCostPrice = Number(costPrice);
+            const newCostPrice = round2(costPrice);
             const existingVariants = await prisma.productVariant.findMany({
                 where: { productId: id }
             });
@@ -190,7 +191,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
 
             for (const v of existingVariants) {
                 const factor = v.factor ?? 1;
-                const variantCost = newCostPrice * factor;
+                const variantCost = round2(newCostPrice * factor);
 
                 let vPrice = v.price;
                 let vRetail = v.retail;
@@ -224,7 +225,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<void> 
         const updateData: any = { name, brandId, categoryId, reorderLevel, allowNegative, imageUrl, hsCode, taxSchduleId, taxMethod, taxRate, active, isService, showBarcodePrice, isFavorite, saleBelowCost };
         
         if (costPrice !== undefined && costPrice !== null) {
-            updateData.avgCostPrice = Number(costPrice);
+            updateData.avgCostPrice = round2(costPrice);
         }
 
         if (stock !== undefined && stock !== null) {
@@ -321,7 +322,7 @@ export const createVariant = async (req: Request, res: Response): Promise<void> 
             finalWholesale = wholesale == 0 ? finalPrice : (wholesale ?? finalPrice);
         }
 
-        const variantCost = product.avgCostPrice * f;
+        const variantCost = round2(product.avgCostPrice * f);
         const resolvedRetail = finalRetail == 0 ? finalPrice : finalRetail;
         const resolvedWholesale = finalWholesale == 0 ? finalPrice : finalWholesale;
 
@@ -390,7 +391,7 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
             }
         }
 
-        const variantCost = variant.product.avgCostPrice * f;
+        const variantCost = round2(variant.product.avgCostPrice * f);
         const resolvedRetail = finalRetail == 0 ? finalPrice : finalRetail;
         const resolvedWholesale = finalWholesale == 0 ? finalPrice : finalWholesale;
 
@@ -412,7 +413,7 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
                 where: { productId: variant.productId, NOT: { id } }
             });
             for (const other of otherVariants) {
-                const costOther = variant.product.avgCostPrice * other.factor;
+                const costOther = round2(variant.product.avgCostPrice * other.factor);
                 const priceOther = finalPrice * other.factor;
                 const resolvedRetailOther = (resolvedRetail || finalPrice) * other.factor;
                 const resolvedWholesaleOther = (resolvedWholesale || finalPrice) * other.factor;
@@ -727,7 +728,7 @@ async function processProduct(
                 reorderLevel: prod.reorderLevel ?? 10,
                 allowNegative: prod.allowNegative ?? false,
                 imageUrl: prod.imageUrl ?? undefined,
-                avgCostPrice: prod.avgCost > 0 ? prod.avgCost : (lowestPrice > 0 ? lowestPrice * 0.90 : 0),
+                avgCostPrice: round2(prod.avgCost > 0 ? prod.avgCost : (lowestPrice > 0 ? lowestPrice * 0.90 : 0)),
                 totalStock: prod.stock > 0 ? prod.stock : 0,
                 variants: safeVariants.length ? { create: safeVariants } : undefined,
             },
