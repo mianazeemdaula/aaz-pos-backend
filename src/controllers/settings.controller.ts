@@ -3,6 +3,11 @@ import { prisma } from "../prisma/prisma";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import {
+    dumpDatabase, restoreDump, detectBackupKind, backupStatus,
+    listDirectories, ensureBackupDir, backupToDirectory, latestBackup,
+    type DumpFormat,
+} from "../utils/pgBackup";
 
 const SETTINGS_FILE = path.join(process.cwd(), "settings.dat");
 const SETTINGS_FILE_LEGACY = path.join(process.cwd(), "settings.json");
@@ -337,7 +342,112 @@ export const getAllUsersSettings = async (_req: Request, res: Response): Promise
 
 // ─── Backup ──────────────────────────────────────────────────────────────────
 
-export const backupDatabase = async (_req: Request, res: Response): Promise<void> => {
+/**
+ * Download a native PostgreSQL backup produced by pg_dump.
+ *
+ * `?format=custom` (default) yields a compressed pg_restore archive;
+ * `?format=plain` yields a self-contained .sql script for psql.
+ */
+export const backupDatabase = async (req: Request, res: Response): Promise<void> => {
+    const format: DumpFormat = req.query.format === "plain" ? "plain" : "custom";
+    let dump: Awaited<ReturnType<typeof dumpDatabase>> | undefined;
+
+    try {
+        dump = await dumpDatabase(format);
+    } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : "Backup failed" });
+        return;
+    }
+
+    res.setHeader("Content-Disposition", `attachment; filename="${dump.filename}"`);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", String(dump.bytes));
+
+    const cleanup = () => { fs.promises.rm(dump!.filePath, { force: true }).catch(() => { }); };
+    res.sendFile(dump.filePath, err => {
+        cleanup();
+        if (err && !res.headersSent) {
+            res.status(500).json({ error: "Failed to send backup file" });
+        }
+    });
+};
+
+/** Whether pg_dump/pg_restore are usable on this machine. */
+export const getBackupStatus = async (_req: Request, res: Response): Promise<void> => {
+    const status = await backupStatus();
+    const dir = String((await getSetting("backupDir")) ?? "");
+    res.json({
+        ...status,
+        backupDir: dir,
+        lastBackup: dir ? await latestBackup(dir) : null,
+    });
+};
+
+/** Read one app setting straight from the DB. */
+async function getSetting(key: string): Promise<unknown> {
+    const row = await prisma.setting.findUnique({ where: { key } });
+    if (!row) return undefined;
+    if (row.type === "boolean") return row.value === "true";
+    if (row.type === "number") return Number(row.value);
+    return row.value;
+}
+
+/**
+ * Browse the server's filesystem so the backup folder can be picked in the UI.
+ * Directory names only — nothing is read from the files themselves.
+ */
+export const browseDirectories = async (req: Request, res: Response): Promise<void> => {
+    try {
+        res.json(await listDirectories(req.query.path ? String(req.query.path) : undefined));
+    } catch (error) {
+        res.status(400).json({
+            error: error instanceof Error ? error.message : "Cannot read that folder",
+        });
+    }
+};
+
+/**
+ * Run a backup into the configured folder and prune old ones.
+ * Used by the "Backup now" button and by the automatic backup on app close.
+ */
+export const runDirectoryBackup = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const dir = String(req.body?.directory ?? (await getSetting("backupDir")) ?? "").trim();
+        if (!dir) {
+            res.status(400).json({ error: "No backup folder configured" });
+            return;
+        }
+
+        const format: DumpFormat = (req.body?.format ?? (await getSetting("backupFormat"))) === "plain"
+            ? "plain"
+            : "custom";
+        const keepSetting = Number(req.body?.keep ?? (await getSetting("backupKeep")));
+        const keep = Number.isFinite(keepSetting) && keepSetting > 0 ? keepSetting : 30;
+
+        const result = await backupToDirectory(dir, format, keep);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : "Backup failed" });
+    }
+};
+
+/** Check a folder before it is saved as the backup location. */
+export const validateBackupDir = async (req: Request, res: Response): Promise<void> => {
+    const dir = String(req.body?.directory ?? "").trim();
+    if (!dir) {
+        res.status(400).json({ error: "No folder provided" });
+        return;
+    }
+    try {
+        const resolved = await ensureBackupDir(dir);
+        res.json({ ok: true, path: resolved, lastBackup: await latestBackup(resolved) });
+    } catch (error) {
+        res.status(400).json({ error: error instanceof Error ? error.message : "Folder is not usable" });
+    }
+};
+
+/** Legacy JSON export, kept for exporting data without the Postgres client tools. */
+export const backupDatabaseJson = async (_req: Request, res: Response): Promise<void> => {
     try {
         const [
             users, accounts, customers, customerLedger, customerPayments,
@@ -412,109 +522,145 @@ export const backupDatabase = async (_req: Request, res: Response): Promise<void
 
 // ─── Restore ─────────────────────────────────────────────────────────────────
 
+/**
+ * Restore from an uploaded backup file.
+ *
+ * pg_dump archives (custom or plain) are handed to pg_restore/psql; JSON files
+ * from older versions of the app still go through the row-by-row importer.
+ */
 export const restoreDatabase = async (req: Request, res: Response): Promise<void> => {
-    const backup = req.body as {
-        version?: number;
-        settings?: Record<string, unknown>;
-        data?: Record<string, unknown[]>;
-    };
+    const file = (req as Request & { file?: { path: string; originalname: string } }).file;
 
-    if (!backup?.data) {
-        res.status(400).json({ error: "Invalid backup file — missing data" });
+    if (!file) {
+        res.status(400).json({ error: "No backup file uploaded" });
         return;
     }
 
     try {
-        // Restore settings in DB
-        if (backup.settings) {
-            for (const [key, value] of Object.entries(backup.settings)) {
-                const fullKey = `company.${key}`;
-                const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
-                const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : typeof value === "object" ? "json" : "string";
-                await prisma.setting.upsert({
-                    where: { key: fullKey },
-                    create: { key: fullKey, value: strValue, type },
-                    update: { value: strValue, type }
-                });
-            }
+        const kind = await detectBackupKind(file.path);
+
+        if (kind === "custom" || kind === "plain") {
+            const warnings = await restoreDump(file.path, kind);
             await loadSettingsFromDb();
+            res.json({
+                message: `Database restored from ${kind === "custom" ? "pg_dump archive" : "SQL script"}`,
+                warnings: warnings || undefined,
+            });
+            return;
         }
 
-        const d = backup.data;
+        if (kind === "json") {
+            const parsed = JSON.parse(await fs.promises.readFile(file.path, "utf8"));
+            await restoreFromJson(parsed);
+            res.json({ message: "Database restored from legacy JSON backup" });
+            return;
+        }
 
-        // Wipe and restore inside a transaction
-        await prisma.$transaction(async (tx) => {
-            // Delete in reverse dependency order
-            await tx.advanceBookingItems.deleteMany();
-            await tx.advanceBooking.deleteMany();
-            await tx.promotionItems.deleteMany();
-            await tx.promotion.deleteMany();
-            await tx.packageItem.deleteMany();
-            await tx.package.deleteMany();
-            await tx.heldPurchase.deleteMany();
-            await tx.heldSale.deleteMany();
-            await tx.stockMovement.deleteMany();
-            await tx.expense.deleteMany();
-            await tx.employeeAdvance.deleteMany();
-            await tx.salarySlip.deleteMany();
-            await tx.employeeLedger.deleteMany();
-            await tx.employee.deleteMany();
-            await tx.purchasePayment.deleteMany();
-            await tx.purchaseItem.deleteMany();
-            await tx.purchase.deleteMany();
-            await tx.salePayment.deleteMany();
-            await tx.saleItem.deleteMany();
-            await tx.sale.deleteMany();
-            await tx.productVariant.deleteMany();
-            await tx.product.deleteMany();
-            await tx.brand.deleteMany();
-            await tx.category.deleteMany();
-            await tx.supplierPayment.deleteMany();
-            await tx.supplierLedger.deleteMany();
-            await tx.supplier.deleteMany();
-            await tx.customerPayment.deleteMany();
-            await tx.customerLedger.deleteMany();
-            await tx.customer.deleteMany();
-            await tx.account.deleteMany();
-            await tx.user.deleteMany();
-
-            // Re-insert in dependency order
-            if (d.users?.length) await tx.user.createMany({ data: d.users as any[], skipDuplicates: true });
-            if (d.accounts?.length) await tx.account.createMany({ data: d.accounts as any[], skipDuplicates: true });
-            if (d.customers?.length) await tx.customer.createMany({ data: d.customers as any[], skipDuplicates: true });
-            if (d.customerLedger?.length) await tx.customerLedger.createMany({ data: d.customerLedger as any[], skipDuplicates: true });
-            if (d.customerPayments?.length) await tx.customerPayment.createMany({ data: d.customerPayments as any[], skipDuplicates: true });
-            if (d.suppliers?.length) await tx.supplier.createMany({ data: d.suppliers as any[], skipDuplicates: true });
-            if (d.supplierLedger?.length) await tx.supplierLedger.createMany({ data: d.supplierLedger as any[], skipDuplicates: true });
-            if (d.supplierPayments?.length) await tx.supplierPayment.createMany({ data: d.supplierPayments as any[], skipDuplicates: true });
-            if (d.categories?.length) await tx.category.createMany({ data: d.categories as any[], skipDuplicates: true });
-            if (d.brands?.length) await tx.brand.createMany({ data: d.brands as any[], skipDuplicates: true });
-            if (d.products?.length) await tx.product.createMany({ data: d.products as any[], skipDuplicates: true });
-            if (d.productVariants?.length) await tx.productVariant.createMany({ data: d.productVariants as any[], skipDuplicates: true });
-            if (d.sales?.length) await tx.sale.createMany({ data: d.sales as any[], skipDuplicates: true });
-            if (d.saleItems?.length) await tx.saleItem.createMany({ data: d.saleItems as any[], skipDuplicates: true });
-            if (d.salePayments?.length) await tx.salePayment.createMany({ data: d.salePayments as any[], skipDuplicates: true });
-            if (d.purchases?.length) await tx.purchase.createMany({ data: d.purchases as any[], skipDuplicates: true });
-            if (d.purchaseItems?.length) await tx.purchaseItem.createMany({ data: d.purchaseItems as any[], skipDuplicates: true });
-            if (d.purchasePayments?.length) await tx.purchasePayment.createMany({ data: d.purchasePayments as any[], skipDuplicates: true });
-            if (d.employees?.length) await tx.employee.createMany({ data: d.employees as any[], skipDuplicates: true });
-            if (d.employeeLedger?.length) await tx.employeeLedger.createMany({ data: d.employeeLedger as any[], skipDuplicates: true });
-            if (d.salarySlips?.length) await tx.salarySlip.createMany({ data: d.salarySlips as any[], skipDuplicates: true });
-            if (d.employeeAdvances?.length) await tx.employeeAdvance.createMany({ data: d.employeeAdvances as any[], skipDuplicates: true });
-            if (d.expenses?.length) await tx.expense.createMany({ data: d.expenses as any[], skipDuplicates: true });
-            if (d.stockMovements?.length) await tx.stockMovement.createMany({ data: d.stockMovements as any[], skipDuplicates: true });
-            if (d.heldSales?.length) await tx.heldSale.createMany({ data: d.heldSales as any[], skipDuplicates: true });
-            if (d.heldPurchases?.length) await tx.heldPurchase.createMany({ data: d.heldPurchases as any[], skipDuplicates: true });
-            if (d.packages?.length) await tx.package.createMany({ data: d.packages as any[], skipDuplicates: true });
-            if (d.packageItems?.length) await tx.packageItem.createMany({ data: d.packageItems as any[], skipDuplicates: true });
-            if (d.promotions?.length) await tx.promotion.createMany({ data: d.promotions as any[], skipDuplicates: true });
-            if (d.promotionItems?.length) await tx.promotionItems.createMany({ data: d.promotionItems as any[], skipDuplicates: true });
-            if (d.advanceBookings?.length) await tx.advanceBooking.createMany({ data: d.advanceBookings as any[], skipDuplicates: true });
-            if (d.advanceBookingItems?.length) await tx.advanceBookingItems.createMany({ data: d.advanceBookingItems as any[], skipDuplicates: true });
-        }, { timeout: 120000 });
-
-        res.json({ message: "Database restored successfully" });
+        res.status(400).json({
+            error: "Unrecognised backup file. Expected a pg_dump archive (.dump), an SQL script (.sql), or a legacy .json backup.",
+        });
     } catch (error) {
         res.status(500).json({ error: error instanceof Error ? error.message : "Restore failed" });
+    } finally {
+        await fs.promises.rm(file.path, { force: true }).catch(() => { });
     }
 };
+
+/** Row-by-row import of a legacy JSON backup. Throws on failure. */
+async function restoreFromJson(backup: {
+    version?: number;
+    settings?: Record<string, unknown>;
+    data?: Record<string, unknown[]>;
+}): Promise<void> {
+    if (!backup?.data) {
+        throw new Error("Invalid backup file — missing data");
+    }
+
+    // Restore settings in DB
+    if (backup.settings) {
+        for (const [key, value] of Object.entries(backup.settings)) {
+            const fullKey = `company.${key}`;
+            const strValue = typeof value === "object" ? JSON.stringify(value) : String(value);
+            const type = typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : typeof value === "object" ? "json" : "string";
+            await prisma.setting.upsert({
+                where: { key: fullKey },
+                create: { key: fullKey, value: strValue, type },
+                update: { value: strValue, type }
+            });
+        }
+        await loadSettingsFromDb();
+    }
+
+    const d = backup.data;
+
+    // Wipe and restore inside a transaction
+    await prisma.$transaction(async (tx) => {
+        // Delete in reverse dependency order
+        await tx.advanceBookingItems.deleteMany();
+        await tx.advanceBooking.deleteMany();
+        await tx.promotionItems.deleteMany();
+        await tx.promotion.deleteMany();
+        await tx.packageItem.deleteMany();
+        await tx.package.deleteMany();
+        await tx.heldPurchase.deleteMany();
+        await tx.heldSale.deleteMany();
+        await tx.stockMovement.deleteMany();
+        await tx.expense.deleteMany();
+        await tx.employeeAdvance.deleteMany();
+        await tx.salarySlip.deleteMany();
+        await tx.employeeLedger.deleteMany();
+        await tx.employee.deleteMany();
+        await tx.purchasePayment.deleteMany();
+        await tx.purchaseItem.deleteMany();
+        await tx.purchase.deleteMany();
+        await tx.salePayment.deleteMany();
+        await tx.saleItem.deleteMany();
+        await tx.sale.deleteMany();
+        await tx.productVariant.deleteMany();
+        await tx.product.deleteMany();
+        await tx.brand.deleteMany();
+        await tx.category.deleteMany();
+        await tx.supplierPayment.deleteMany();
+        await tx.supplierLedger.deleteMany();
+        await tx.supplier.deleteMany();
+        await tx.customerPayment.deleteMany();
+        await tx.customerLedger.deleteMany();
+        await tx.customer.deleteMany();
+        await tx.account.deleteMany();
+        await tx.user.deleteMany();
+
+        // Re-insert in dependency order
+        if (d.users?.length) await tx.user.createMany({ data: d.users as any[], skipDuplicates: true });
+        if (d.accounts?.length) await tx.account.createMany({ data: d.accounts as any[], skipDuplicates: true });
+        if (d.customers?.length) await tx.customer.createMany({ data: d.customers as any[], skipDuplicates: true });
+        if (d.customerLedger?.length) await tx.customerLedger.createMany({ data: d.customerLedger as any[], skipDuplicates: true });
+        if (d.customerPayments?.length) await tx.customerPayment.createMany({ data: d.customerPayments as any[], skipDuplicates: true });
+        if (d.suppliers?.length) await tx.supplier.createMany({ data: d.suppliers as any[], skipDuplicates: true });
+        if (d.supplierLedger?.length) await tx.supplierLedger.createMany({ data: d.supplierLedger as any[], skipDuplicates: true });
+        if (d.supplierPayments?.length) await tx.supplierPayment.createMany({ data: d.supplierPayments as any[], skipDuplicates: true });
+        if (d.categories?.length) await tx.category.createMany({ data: d.categories as any[], skipDuplicates: true });
+        if (d.brands?.length) await tx.brand.createMany({ data: d.brands as any[], skipDuplicates: true });
+        if (d.products?.length) await tx.product.createMany({ data: d.products as any[], skipDuplicates: true });
+        if (d.productVariants?.length) await tx.productVariant.createMany({ data: d.productVariants as any[], skipDuplicates: true });
+        if (d.sales?.length) await tx.sale.createMany({ data: d.sales as any[], skipDuplicates: true });
+        if (d.saleItems?.length) await tx.saleItem.createMany({ data: d.saleItems as any[], skipDuplicates: true });
+        if (d.salePayments?.length) await tx.salePayment.createMany({ data: d.salePayments as any[], skipDuplicates: true });
+        if (d.purchases?.length) await tx.purchase.createMany({ data: d.purchases as any[], skipDuplicates: true });
+        if (d.purchaseItems?.length) await tx.purchaseItem.createMany({ data: d.purchaseItems as any[], skipDuplicates: true });
+        if (d.purchasePayments?.length) await tx.purchasePayment.createMany({ data: d.purchasePayments as any[], skipDuplicates: true });
+        if (d.employees?.length) await tx.employee.createMany({ data: d.employees as any[], skipDuplicates: true });
+        if (d.employeeLedger?.length) await tx.employeeLedger.createMany({ data: d.employeeLedger as any[], skipDuplicates: true });
+        if (d.salarySlips?.length) await tx.salarySlip.createMany({ data: d.salarySlips as any[], skipDuplicates: true });
+        if (d.employeeAdvances?.length) await tx.employeeAdvance.createMany({ data: d.employeeAdvances as any[], skipDuplicates: true });
+        if (d.expenses?.length) await tx.expense.createMany({ data: d.expenses as any[], skipDuplicates: true });
+        if (d.stockMovements?.length) await tx.stockMovement.createMany({ data: d.stockMovements as any[], skipDuplicates: true });
+        if (d.heldSales?.length) await tx.heldSale.createMany({ data: d.heldSales as any[], skipDuplicates: true });
+        if (d.heldPurchases?.length) await tx.heldPurchase.createMany({ data: d.heldPurchases as any[], skipDuplicates: true });
+        if (d.packages?.length) await tx.package.createMany({ data: d.packages as any[], skipDuplicates: true });
+        if (d.packageItems?.length) await tx.packageItem.createMany({ data: d.packageItems as any[], skipDuplicates: true });
+        if (d.promotions?.length) await tx.promotion.createMany({ data: d.promotions as any[], skipDuplicates: true });
+        if (d.promotionItems?.length) await tx.promotionItems.createMany({ data: d.promotionItems as any[], skipDuplicates: true });
+        if (d.advanceBookings?.length) await tx.advanceBooking.createMany({ data: d.advanceBookings as any[], skipDuplicates: true });
+        if (d.advanceBookingItems?.length) await tx.advanceBookingItems.createMany({ data: d.advanceBookingItems as any[], skipDuplicates: true });
+    }, { timeout: 120000 });
+}
