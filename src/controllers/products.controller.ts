@@ -482,28 +482,61 @@ export const deleteVariant = async (req: Request, res: Response): Promise<void> 
 
 export const getVariantByBarcode = async (req: Request, res: Response): Promise<void> => {
     const { barcode } = req.params;
+    const cleanBarcode = (barcode || "").trim();
+    if (!cleanBarcode) {
+        res.status(400).json({ error: "Barcode is required" });
+        return;
+    }
     try {
-        const variant = await prisma.productVariant.findUnique({
-            where: { barcode },
+        // 1. Try whole / exact barcode match first
+        let variant = await prisma.productVariant.findFirst({
+            where: { barcode: { equals: cleanBarcode, mode: "insensitive" } },
             include: { product: { include: { category: true, brand: true, variants: true } } },
         });
+
+        // 2. If exact match not found, try matching the end of the barcode
+        if (!variant) {
+            const matches = await prisma.productVariant.findMany({
+                where: { barcode: { endsWith: cleanBarcode, mode: "insensitive" } },
+                include: { product: { include: { category: true, brand: true, variants: true } } },
+            });
+            if (matches.length > 0) {
+                // Prioritize shortest barcode length match (closest exact fit)
+                matches.sort((a, b) => (a.barcode?.length || 0) - (b.barcode?.length || 0));
+                variant = matches[0];
+            }
+        }
+
         if (!variant) { res.status(404).json({ error: "Variant not found" }); return; }
         res.json(variant);
-    } catch {
+    } catch (error) {
+        console.error("getVariantByBarcode error:", error);
         res.status(500).json({ error: "Failed to find variant" });
     }
 };
 
 export const getProductByBarcode = async (req: Request, res: Response): Promise<void> => {
     const { barcode } = req.params;
+    const cleanBarcode = (barcode || "").trim();
+    if (!cleanBarcode) {
+        res.status(400).json({ error: "Barcode is required" });
+        return;
+    }
     try {
-        const product = await prisma.product.findFirst({
-            where: { variants: { some: { barcode } } },
+        let product = await prisma.product.findFirst({
+            where: { variants: { some: { barcode: { equals: cleanBarcode, mode: "insensitive" } } } },
             include: { brand: true, category: true, variants: true },
         });
+
+        if (!product) {
+            product = await prisma.product.findFirst({
+                where: { variants: { some: { barcode: { endsWith: cleanBarcode, mode: "insensitive" } } } },
+                include: { brand: true, category: true, variants: true },
+            });
+        }
+
         if (!product) { res.status(404).json({ error: "Product not found" }); return; }
         res.json(product);
-
     } catch {
         res.status(500).json({ error: "Failed to find product" });
     }
