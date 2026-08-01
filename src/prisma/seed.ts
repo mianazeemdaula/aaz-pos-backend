@@ -22,15 +22,6 @@ export async function seedDatabase() {
         },
     });
 
-    // Create default Chart of Accounts
-    await prisma.account.createMany({
-        data: [
-            { code: "1001", name: "Cash", type: "ASSET" },
-            { code: "1002", name: "Card", type: "ASSET" },
-            { code: "1003", name: "JazzCash", type: "ASSET" },
-        ],
-    });
-
     await prisma.setting.createMany({
         data: [
             { key: "sale.allowPriceChange", value: "true", type: "boolean" },
