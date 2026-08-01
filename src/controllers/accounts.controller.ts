@@ -80,10 +80,63 @@ export const getAccount = async (req: Request, res: Response): Promise<void> => 
     }
 };
 
+const TYPE_PREFIXES: Record<string, string> = {
+    ASSET: "1",
+    LIABILITY: "2",
+    EQUITY: "3",
+    INCOME: "4",
+    EXPENSE: "5",
+};
+
+export async function generateAccountCode(type: string): Promise<string> {
+    const prefix = TYPE_PREFIXES[type] || "1";
+    const minCodeNum = parseInt(`${prefix}001`, 10);
+
+    const accounts = await prisma.account.findMany({
+        where: { type: type as any },
+        select: { code: true },
+    });
+
+    let maxNum = 0;
+    for (const acc of accounts) {
+        if (acc.code && acc.code.startsWith(prefix)) {
+            const num = parseInt(acc.code, 10);
+            if (!isNaN(num) && num > maxNum) {
+                maxNum = num;
+            }
+        }
+    }
+
+    let nextNum = maxNum > 0 ? maxNum + 1 : minCodeNum;
+
+    while (true) {
+        const codeStr = nextNum.toString();
+        const existing = await prisma.account.findUnique({ where: { code: codeStr } });
+        if (!existing) {
+            return codeStr;
+        }
+        nextNum++;
+    }
+}
+
+export const getNextAccountCode = async (req: Request, res: Response): Promise<void> => {
+    const type = (req.query.type as string) || "ASSET";
+    if (!VALID_TYPES.includes(type)) {
+        res.status(400).json({ error: `type must be one of: ${VALID_TYPES.join(", ")}` });
+        return;
+    }
+    try {
+        const code = await generateAccountCode(type);
+        res.json({ code });
+    } catch {
+        res.status(500).json({ error: "Failed to generate account code" });
+    }
+};
+
 export const createAccount = async (req: Request, res: Response): Promise<void> => {
-    const { code, name, type, active } = req.body;
-    if (!code || !name || !type) {
-        res.status(400).json({ error: "code, name and type are required" });
+    let { code, name, type, active } = req.body;
+    if (!name || !type) {
+        res.status(400).json({ error: "name and type are required" });
         return;
     }
     if (!VALID_TYPES.includes(type)) {
@@ -91,6 +144,11 @@ export const createAccount = async (req: Request, res: Response): Promise<void> 
         return;
     }
     try {
+        if (!code || typeof code !== "string" || !code.trim()) {
+            code = await generateAccountCode(type);
+        } else {
+            code = code.trim();
+        }
         const existing = await prisma.account.findUnique({ where: { code } });
         if (existing) { res.status(409).json({ error: "Account code already exists" }); return; }
         const account = await prisma.account.create({ data: { code, name, type, active } });

@@ -1,10 +1,11 @@
 import { Router } from "express";
-import { listAccounts, getAccount, createAccount, updateAccount, deleteAccount, transferBetweenAccounts, listTransfers } from "../controllers/accounts.controller";
+import { listAccounts, getAccount, createAccount, updateAccount, deleteAccount, transferBetweenAccounts, listTransfers, getNextAccountCode } from "../controllers/accounts.controller";
 
 const router = Router();
 
 router.get("/", listAccounts);
 router.get("/transfers", listTransfers);
+router.get("/next-code", getNextAccountCode);
 router.get("/:id", getAccount);
 router.post("/", createAccount);
 router.post("/transfer", transferBetweenAccounts);

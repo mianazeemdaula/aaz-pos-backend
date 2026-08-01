@@ -96,14 +96,14 @@ export const getCustomer = async (req: Request, res: Response): Promise<void> =>
 };
 
 export const createCustomer = async (req: Request, res: Response): Promise<void> => {
-    const { name, phone, address, email, creditLimit, openingBalance, openingBalanceType } = req.body;
+    const { name, phone, address, email, city, ntn, cnic, creditLimit, openingBalance, openingBalanceType } = req.body;
     if (!name) { res.status(400).json({ error: "name is required" }); return; }
     try {
-        const obVal = typeof openingBalance === 'number' ? openingBalance : null;
-        if (obVal !== null && obVal !== 0) {
+        const obVal = typeof openingBalance === 'number' && !isNaN(openingBalance) ? openingBalance : (openingBalance != null ? Number(openingBalance) : null);
+        if (obVal !== null && obVal !== 0 && !isNaN(obVal)) {
             const customer = await prisma.$transaction(async (tx) => {
                 const c = await tx.customer.create({
-                    data: { name, phone, address, email, creditLimit },
+                    data: { name, phone, address, email, city, ntn, cnic, creditLimit },
                 });
 
                 let debit = 0;
@@ -135,7 +135,7 @@ export const createCustomer = async (req: Request, res: Response): Promise<void>
             res.status(201).json({ ...customer, balance });
         } else {
             const customer = await prisma.customer.create({
-                data: { name, phone, address, email, creditLimit },
+                data: { name, phone, address, email, city, ntn, cnic, creditLimit },
             });
             res.status(201).json({ ...customer, balance: 0 });
         }
@@ -146,12 +146,12 @@ export const createCustomer = async (req: Request, res: Response): Promise<void>
 
 export const updateCustomer = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, phone, address, email, creditLimit, active, openingBalance, openingBalanceType } = req.body;
+    const { name, phone, address, email, city, ntn, cnic, creditLimit, active, openingBalance, openingBalanceType } = req.body;
     try {
         const customer = await prisma.$transaction(async (tx) => {
             const c = await tx.customer.update({
                 where: { id },
-                data: { name, phone, address, email, creditLimit, active },
+                data: { name, phone, address, email, city, ntn, cnic, creditLimit, active },
             });
 
             if (openingBalance !== undefined) {
