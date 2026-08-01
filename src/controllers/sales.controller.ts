@@ -68,7 +68,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
     const {
         customerId, items, payments,
         discount = 0, taxAmount = 0,
-        parentSaleId,
+        parentSaleId, note,
     } = req.body;
     const userId = req.user?.id;
     if (!items?.length) {
@@ -270,6 +270,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
                     taxAmount: round2(Number(taxAmount)),
                     discount: round2(Number(discount)),
                     changeAmount,
+                    note: note ? String(note) : null,
                     parentSaleId: parsedParentSaleId,
                     items: {
                         create: items.map((item: any) => {

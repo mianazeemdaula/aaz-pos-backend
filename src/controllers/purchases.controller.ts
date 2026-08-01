@@ -70,7 +70,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
         discount = 0, taxAmount = 0, expenses = 0, date,
         paidAmount: rawPaidAmount,
         payments = [],
-        parentPurchaseId,
+        parentPurchaseId, note,
     } = req.body;
     const userId = req.user?.id;
 
@@ -195,6 +195,7 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                     discount: round2(discount),
                     taxAmount: round2(taxAmount),
                     expenses: round2(expenses),
+                    note: note ? String(note) : null,
                     date: purchaseDate,
                     parentPurchaseId: parsedParentPurchaseId,
                     items: {
