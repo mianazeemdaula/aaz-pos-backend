@@ -14,7 +14,7 @@ import {
 async function computeBalancesForIdsBeforeDate(accountIds: number[], beforeDate: Date): Promise<Map<number, number>> {
     if (accountIds.length === 0) return new Map();
 
-    const [sp, cp, pp, ex, sup, sal, ea, trFrom, trTo] = await Promise.all([
+    const [sp, cp, pp, ex, sup, sal, ea, trFrom, trTo, accounts] = await Promise.all([
         prisma.salePayment.groupBy({
             by: ["accountId"],
             where: { accountId: { in: accountIds }, createdAt: { lt: beforeDate } },
@@ -60,9 +60,13 @@ async function computeBalancesForIdsBeforeDate(accountIds: number[], beforeDate:
             where: { toAccountId: { in: accountIds }, createdAt: { lt: beforeDate } },
             _sum: { amount: true }
         }),
+        prisma.account.findMany({
+            where: { id: { in: accountIds } },
+            select: { id: true, openingBalance: true }
+        }),
     ]);
 
-    const balances = new Map<number, number>(accountIds.map(id => [id, 0]));
+    const balances = new Map<number, number>(accounts.map(a => [a.id, a.openingBalance ?? 0]));
 
     for (const row of sp) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) + (row._sum.amount ?? 0));
     for (const row of cp) {

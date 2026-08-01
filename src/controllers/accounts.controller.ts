@@ -7,7 +7,7 @@ const VALID_TYPES = ["ASSET", "LIABILITY", "EQUITY", "INCOME", "EXPENSE"];
 async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, number>> {
     if (accountIds.length === 0) return new Map();
 
-    const [sp, cp, pp, ex, sup, sal, ea, trFrom, trTo] = await Promise.all([
+    const [sp, cp, pp, ex, sup, sal, ea, trFrom, trTo, accounts] = await Promise.all([
         prisma.salePayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.customerPayment.groupBy({ by: ["accountId", "type"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.purchasePayment.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
@@ -17,9 +17,10 @@ async function computeBalancesForIds(accountIds: number[]): Promise<Map<number, 
         prisma.employeeAdvance.groupBy({ by: ["accountId"], where: { accountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.accountTransfer.groupBy({ by: ["fromAccountId"], where: { fromAccountId: { in: accountIds } }, _sum: { amount: true } }),
         prisma.accountTransfer.groupBy({ by: ["toAccountId"], where: { toAccountId: { in: accountIds } }, _sum: { amount: true } }),
+        prisma.account.findMany({ where: { id: { in: accountIds } }, select: { id: true, openingBalance: true } }),
     ]);
 
-    const balances = new Map<number, number>(accountIds.map(id => [id, 0]));
+    const balances = new Map<number, number>(accounts.map(a => [a.id, a.openingBalance ?? 0]));
 
     for (const row of sp) balances.set(row.accountId, (balances.get(row.accountId) ?? 0) + (row._sum.amount ?? 0));
     for (const row of cp) {
@@ -134,7 +135,7 @@ export const getNextAccountCode = async (req: Request, res: Response): Promise<v
 };
 
 export const createAccount = async (req: Request, res: Response): Promise<void> => {
-    let { code, name, type, active } = req.body;
+    let { code, name, type, active, openingBalance, balance } = req.body;
     if (!name || !type) {
         res.status(400).json({ error: "name and type are required" });
         return;
@@ -143,6 +144,10 @@ export const createAccount = async (req: Request, res: Response): Promise<void> 
         res.status(400).json({ error: `type must be one of: ${VALID_TYPES.join(", ")}` });
         return;
     }
+    const obVal = typeof openingBalance === "number" && !isNaN(openingBalance)
+        ? openingBalance
+        : (typeof balance === "number" && !isNaN(balance) ? balance : (openingBalance != null ? Number(openingBalance) || 0 : 0));
+
     try {
         if (!code || typeof code !== "string" || !code.trim()) {
             code = await generateAccountCode(type);
@@ -151,7 +156,7 @@ export const createAccount = async (req: Request, res: Response): Promise<void> 
         }
         const existing = await prisma.account.findUnique({ where: { code } });
         if (existing) { res.status(409).json({ error: "Account code already exists" }); return; }
-        const account = await prisma.account.create({ data: { code, name, type, active } });
+        const account = await prisma.account.create({ data: { code, name, type, active, openingBalance: obVal } });
         res.status(201).json(account);
     } catch {
         res.status(500).json({ error: "Failed to create account" });
@@ -160,17 +165,22 @@ export const createAccount = async (req: Request, res: Response): Promise<void> 
 
 export const updateAccount = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { code, name, type, active } = req.body;
+    const { code, name, type, active, openingBalance, balance } = req.body;
     if (type && !VALID_TYPES.includes(type)) {
         res.status(400).json({ error: `type must be one of: ${VALID_TYPES.join(", ")}` });
         return;
+    }
+    const dataToUpdate: any = { code, name, type, active };
+    if (openingBalance !== undefined || balance !== undefined) {
+        const rawOb = openingBalance !== undefined ? openingBalance : balance;
+        dataToUpdate.openingBalance = typeof rawOb === "number" && !isNaN(rawOb) ? rawOb : (rawOb != null ? Number(rawOb) || 0 : 0);
     }
     try {
         if (code) {
             const existing = await prisma.account.findFirst({ where: { code, NOT: { id } } });
             if (existing) { res.status(409).json({ error: "Account code already in use" }); return; }
         }
-        const account = await prisma.account.update({ where: { id }, data: { code, name, type, active } });
+        const account = await prisma.account.update({ where: { id }, data: dataToUpdate });
         res.json(account);
     } catch {
         res.status(500).json({ error: "Failed to update account" });

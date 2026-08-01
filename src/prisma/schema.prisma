@@ -69,11 +69,12 @@ model UserPermission {
 
 // ==== CHART OF ACCOUNTS ====
 model Account {
-  id     Int         @id @default(autoincrement())
-  code   String      @unique // e.g., "1001", "2001"
-  name   String // e.g., "Cash", "Bank - HBL", "Accounts Receivable"
-  type   AccountType // ASSET, LIABILITY, EQUITY, INCOME, EXPENSE
-  active Boolean     @default(true)
+  id             Int         @id @default(autoincrement())
+  code           String      @unique // e.g., "1001", "2001"
+  name           String // e.g., "Cash", "Bank - HBL", "Accounts Receivable"
+  type           AccountType // ASSET, LIABILITY, EQUITY, INCOME, EXPENSE
+  openingBalance Float       @default(0) @map("opening_balance")
+  active         Boolean     @default(true)
 
   // Relations
   purchases         Purchase[]

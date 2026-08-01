@@ -226,7 +226,7 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
 
         const totalDebit = entries.reduce((s, e) => s + e.debit, 0);
         const totalCredit = entries.reduce((s, e) => s + e.credit, 0);
-        const netBalance = totalDebit - totalCredit;
+        const netBalance = (account.openingBalance ?? 0) + totalDebit - totalCredit;
 
         // PDF
         const reportFonts = fonts();
