@@ -146,63 +146,11 @@ export const createCustomer = async (req: Request, res: Response): Promise<void>
 
 export const updateCustomer = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, phone, address, email, city, ntn, cnic, creditLimit, active, openingBalance, openingBalanceType } = req.body;
+    const { name, phone, address, email, city, ntn, cnic, creditLimit, active } = req.body;
     try {
-        const customer = await prisma.$transaction(async (tx) => {
-            const c = await tx.customer.update({
-                where: { id },
-                data: { name, phone, address, email, city, ntn, cnic, creditLimit, active },
-            });
-
-            if (openingBalance !== undefined) {
-                const obVal = typeof openingBalance === 'number' ? openingBalance : 0;
-                
-                // Find existing OPENING_BALANCE ledger entry
-                const existingOB = await tx.customerLedger.findFirst({
-                    where: { customerId: id, type: 'OPENING_BALANCE' },
-                });
-
-                if (obVal === 0) {
-                    // If opening balance is updated to 0, delete the ledger entry
-                    if (existingOB) {
-                        await tx.customerLedger.delete({
-                            where: { id: existingOB.id },
-                        });
-                    }
-                } else {
-                    let debit = 0;
-                    let credit = 0;
-                    if (openingBalanceType) {
-                        const typeUpper = String(openingBalanceType).toUpperCase();
-                        if (typeUpper === 'CREDIT') {
-                            credit = Math.abs(obVal);
-                        } else {
-                            debit = Math.abs(obVal);
-                        }
-                    } else {
-                        debit = obVal > 0 ? obVal : 0;
-                        credit = obVal < 0 ? Math.abs(obVal) : 0;
-                    }
-
-                    if (existingOB) {
-                        await tx.customerLedger.update({
-                            where: { id: existingOB.id },
-                            data: { debit, credit, amount: Math.abs(obVal) },
-                        });
-                    } else {
-                        await tx.customerLedger.create({
-                            data: {
-                                customerId: id,
-                                type: 'OPENING_BALANCE',
-                                debit,
-                                credit,
-                                note: 'Opening balance',
-                            },
-                        });
-                    }
-                }
-            }
-            return c;
+        const customer = await prisma.customer.update({
+            where: { id },
+            data: { name, phone, address, email, city, ntn, cnic, creditLimit, active },
         });
 
         const balance = await computeCustomerBalance(id);

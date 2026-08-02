@@ -134,8 +134,6 @@ export const getSupplierBalancesReportPDF = async (req: Request, res: Response):
             sno: i + 1,
             name: s.name,
             phone: s.phone ?? "N/A",
-            paymentTerms: s.paymentTerms ?? "N/A",
-            taxId: s.taxId ?? "N/A",
             balance: s.balance,
             status: s.balance > 0 ? "Payable" : "Overpaid",
         }));
@@ -170,18 +168,16 @@ export const getSupplierBalancesReportPDF = async (req: Request, res: Response):
 
         pdfGen.moveDown(0.5);
 
-        // Supplier balances table — 7 columns
+        // Supplier balances table — 5 columns
         doc.x = doc.page.margins.left;
         const table = doc.table({
-            columnStyles: [30, "*", 85, 100, 90, 90, 70],
+            columnStyles: [35, "*", 120, 110, 90],
             rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
         });
         table.row([
             { text: "#", align: { x: "center", y: "center" } },
             { text: "Supplier Name", align: { x: "left", y: "center" } },
             { text: "Phone", align: { x: "center", y: "center" } },
-            { text: "Payment Terms", align: { x: "left", y: "center" } },
-            { text: "Tax ID", align: { x: "center", y: "center" } },
             { text: "Balance", align: { x: "right", y: "center" } },
             { text: "Status", align: { x: "center", y: "center" } },
         ]);
@@ -190,15 +186,13 @@ export const getSupplierBalancesReportPDF = async (req: Request, res: Response):
                 { text: String(row.sno), align: { x: "center", y: "center" } },
                 { text: row.name, align: { x: "left", y: "center" } },
                 { text: row.phone, align: { x: "center", y: "center" } },
-                { text: row.paymentTerms, align: { x: "left", y: "center" } },
-                { text: row.taxId, align: { x: "center", y: "center" } },
                 { text: fmtCurrency(row.balance), align: { x: "right", y: "center" } },
                 { text: row.status, align: { x: "center", y: "center" } },
             ]);
         });
         doc.fontSize(9);
         table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
+            { text: "Grand Total", colSpan: 3, align: { x: "justify", y: "center" } },
             { text: fmtCurrency(totalPayable - totalOverpaid), align: { x: "right", y: "center" } },
             { text: "", align: { x: "center", y: "center" } },
         ]);

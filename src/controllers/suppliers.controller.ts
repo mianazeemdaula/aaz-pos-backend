@@ -149,63 +149,11 @@ export const createSupplier = async (req: Request, res: Response): Promise<void>
 
 export const updateSupplier = async (req: Request, res: Response): Promise<void> => {
     const id = parseInt(req.params.id);
-    const { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, active, openingBalance, openingBalanceType } = req.body;
+    const { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, active } = req.body;
     try {
-        const supplier = await prisma.$transaction(async (tx) => {
-            const s = await tx.supplier.update({
-                where: { id },
-                data: { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, active },
-            });
-
-            if (openingBalance !== undefined) {
-                const obVal = typeof openingBalance === 'number' && !isNaN(openingBalance) ? openingBalance : (openingBalance != null ? (Number(openingBalance) || 0) : 0);
-                
-                // Find existing OPENING_BALANCE ledger entry
-                const existingOB = await tx.supplierLedger.findFirst({
-                    where: { supplierId: id, type: 'OPENING_BALANCE' },
-                });
-
-                if (obVal === 0) {
-                    // If opening balance is updated to 0, delete the ledger entry
-                    if (existingOB) {
-                        await tx.supplierLedger.delete({
-                            where: { id: existingOB.id },
-                        });
-                    }
-                } else {
-                    let debit = 0;
-                    let credit = 0;
-                    if (openingBalanceType) {
-                        const typeUpper = String(openingBalanceType).toUpperCase();
-                        if (typeUpper === 'CREDIT') {
-                            debit = Math.abs(obVal);
-                        } else {
-                            credit = Math.abs(obVal);
-                        }
-                    } else {
-                        debit = obVal > 0 ? obVal : 0;
-                        credit = obVal < 0 ? Math.abs(obVal) : 0;
-                    }
-
-                    if (existingOB) {
-                        await tx.supplierLedger.update({
-                            where: { id: existingOB.id },
-                            data: { debit, credit, amount: Math.abs(obVal) },
-                        });
-                    } else {
-                        await tx.supplierLedger.create({
-                            data: {
-                                supplierId: id,
-                                type: 'OPENING_BALANCE',
-                                debit,
-                                credit,
-                                note: 'Opening balance',
-                            },
-                        });
-                    }
-                }
-            }
-            return s;
+        const supplier = await prisma.supplier.update({
+            where: { id },
+            data: { name, phone, address, email, city, ntn, cnic, bankDetails, paymentTerms, taxId, active },
         });
 
         const balance = await computeSupplierBalance(id);
