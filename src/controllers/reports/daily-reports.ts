@@ -10,6 +10,25 @@ import {
     createPDFGenerator
 } from "./helpers";
 
+// Helper to format real transaction time (using createdAt when date has 00:00:00 UTC / date-only)
+function getDisplayTime(item: { createdAt?: Date | string; date?: Date | string }): string {
+    const cDate = item.createdAt ? new Date(item.createdAt) : null;
+    const dDate = item.date ? new Date(item.date) : null;
+    
+    if (dDate && !isNaN(dDate.getTime())) {
+        const hours = dDate.getUTCHours();
+        const mins = dDate.getUTCMinutes();
+        const secs = dDate.getUTCSeconds();
+        if (hours !== 0 || mins !== 0 || secs !== 0) {
+            return fmtDate(dDate, "hh:mm A");
+        }
+    }
+    if (cDate && !isNaN(cDate.getTime())) {
+        return fmtDate(cDate, "hh:mm A");
+    }
+    return dDate ? fmtDate(dDate, "hh:mm A") : "N/A";
+}
+
 // Helper to compute starting balances of active accounts prior to startOfDay
 async function computeBalancesForIdsBeforeDate(accountIds: number[], beforeDate: Date): Promise<Map<number, number>> {
     if (accountIds.length === 0) return new Map();
@@ -435,7 +454,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             regularPurchases.forEach((p, i) => {
                 t.row([
                     { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(p.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: getDisplayTime(p), align: { x: "center", y: "center" } },
                     { text: p.supplier?.name ?? "N/A", align: { x: "left", y: "center" } },
                     { text: fmtCurrency(p.totalAmount), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(p.paidAmount), align: { x: "right", y: "center" } },
@@ -463,7 +482,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             purchaseReturns.forEach((p, i) => {
                 t.row([
                     { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(p.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: getDisplayTime(p), align: { x: "center", y: "center" } },
                     { text: p.supplier?.name ?? "N/A", align: { x: "left", y: "center" } },
                     { text: fmtCurrency(Math.abs(p.totalAmount)), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(Math.abs(p.paidAmount)), align: { x: "right", y: "center" } },
@@ -493,7 +512,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             expenses.forEach((ex, i) => {
                 t.row([
                     { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(ex.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: getDisplayTime(ex), align: { x: "center", y: "center" } },
                     { text: ex.description, align: { x: "left", y: "center" } },
                     { text: ex.category, align: { x: "left", y: "center" } },
                     { text: ex.account.name, align: { x: "left", y: "center" } },
@@ -550,7 +569,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             customerPayments.forEach((cp, i) => {
                 t.row([
                     { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(cp.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: getDisplayTime(cp), align: { x: "center", y: "center" } },
                     { text: cp.customer.name, align: { x: "left", y: "center" } },
                     { text: cp.account.name, align: { x: "left", y: "center" } },
                     { text: fmtCurrency(cp.amount), align: { x: "right", y: "center" } },
@@ -579,7 +598,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             supplierPayments.forEach((sp, i) => {
                 t.row([
                     { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(sp.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: getDisplayTime(sp), align: { x: "center", y: "center" } },
                     { text: sp.supplier.name, align: { x: "left", y: "center" } },
                     { text: sp.account.name, align: { x: "left", y: "center" } },
                     { text: fmtCurrency(sp.amount), align: { x: "right", y: "center" } },
@@ -608,7 +627,7 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             employeeAdvances.forEach((ea, i) => {
                 t.row([
                     { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(ea.date, "hh:mm A"), align: { x: "center", y: "center" } },
+                    { text: getDisplayTime(ea), align: { x: "center", y: "center" } },
                     { text: ea.employee.name, align: { x: "left", y: "center" } },
                     { text: ea.account.name, align: { x: "left", y: "center" } },
                     { text: fmtCurrency(ea.amount), align: { x: "right", y: "center" } },

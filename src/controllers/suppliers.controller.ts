@@ -351,7 +351,17 @@ export const createSupplierPayment = async (req: Request, res: Response): Promis
         const supplier = await prisma.supplier.findUnique({ where: { id: supplierId } });
         if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
 
-        const paymentDate = date ? new Date(date) : new Date();
+        let paymentDate = new Date();
+        if (date) {
+            const d = new Date(date);
+            if (!isNaN(d.getTime())) {
+                if (typeof date === 'string' && date.length === 10) {
+                    const now = new Date();
+                    d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+                }
+                paymentDate = d;
+            }
+        }
         const pType = type === "RECEIVED" ? "RECEIVED" : "SENT";
 
         let debit = 0;

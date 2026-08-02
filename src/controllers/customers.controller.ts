@@ -348,7 +348,17 @@ export const createCustomerPayment = async (req: Request, res: Response): Promis
         const customer = await prisma.customer.findUnique({ where: { id: customerId } });
         if (!customer) { res.status(404).json({ error: "Customer not found" }); return; }
 
-        const paymentDate = date ? new Date(date) : new Date();
+        let paymentDate = new Date();
+        if (date) {
+            const d = new Date(date);
+            if (!isNaN(d.getTime())) {
+                if (typeof date === 'string' && date.length === 10) {
+                    const now = new Date();
+                    d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+                }
+                paymentDate = d;
+            }
+        }
         const pType = type === "SENT" ? "SENT" : "RECEIVED";
 
         let debit = 0;
