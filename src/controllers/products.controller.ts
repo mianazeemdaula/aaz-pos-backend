@@ -306,36 +306,51 @@ export const createVariant = async (req: Request, res: Response): Promise<void> 
         if (!product) { res.status(404).json({ error: "Product not found" }); return; }
 
         const defaultVariant = product.variants.find(v => v.isDefault) || product.variants[0];
-        const f = factor ?? 1;
+        const f = factor !== undefined && factor !== null && factor !== "" ? Number(factor) : 1;
 
-        let finalPrice = price;
-        let finalRetail = retail;
-        let finalWholesale = wholesale;
-
-        if (defaultVariant) {
-            finalPrice = defaultVariant.price * f;
-            finalRetail = (defaultVariant.retail ?? defaultVariant.price) * f;
-            finalWholesale = (defaultVariant.wholesale ?? defaultVariant.price) * f;
+        let finalPrice: number;
+        if (price !== undefined && price !== null && price !== "") {
+            finalPrice = Number(price);
+        } else if (defaultVariant) {
+            finalPrice = round2(defaultVariant.price * f);
         } else {
-            finalPrice = price ?? 0;
-            finalRetail = retail == 0 ? finalPrice : (retail ?? finalPrice);
-            finalWholesale = wholesale == 0 ? finalPrice : (wholesale ?? finalPrice);
+            finalPrice = 0;
+        }
+
+        let finalRetail: number | null;
+        if (retail === null || retail === "") {
+            finalRetail = null;
+        } else if (retail !== undefined && retail !== null) {
+            finalRetail = Number(retail);
+        } else if (defaultVariant && defaultVariant.retail != null) {
+            finalRetail = round2(defaultVariant.retail * f);
+        } else {
+            finalRetail = null;
+        }
+
+        let finalWholesale: number | null;
+        if (wholesale === null || wholesale === "") {
+            finalWholesale = null;
+        } else if (wholesale !== undefined && wholesale !== null) {
+            finalWholesale = Number(wholesale);
+        } else if (defaultVariant && defaultVariant.wholesale != null) {
+            finalWholesale = round2(defaultVariant.wholesale * f);
+        } else {
+            finalWholesale = null;
         }
 
         const variantCost = round2(product.avgCostPrice * f);
-        const resolvedRetail = finalRetail == 0 ? finalPrice : finalRetail;
-        const resolvedWholesale = finalWholesale == 0 ? finalPrice : finalWholesale;
 
         if (finalPrice <= variantCost) {
             res.status(400).json({ error: `Price (${finalPrice}) for variant must be greater than its cost price (${variantCost})` });
             return;
         }
-        if (resolvedRetail > 0 && resolvedRetail <= variantCost) {
-            res.status(400).json({ error: `Retail price (${resolvedRetail}) for variant must be greater than its cost price (${variantCost})` });
+        if (finalRetail !== null && finalRetail > 0 && finalRetail <= variantCost) {
+            res.status(400).json({ error: `Retail price (${finalRetail}) for variant must be greater than its cost price (${variantCost})` });
             return;
         }
-        if (resolvedWholesale > 0 && resolvedWholesale <= variantCost) {
-            res.status(400).json({ error: `Wholesale price (${resolvedWholesale}) for variant must be greater than its cost price (${variantCost})` });
+        if (finalWholesale !== null && finalWholesale > 0 && finalWholesale <= variantCost) {
+            res.status(400).json({ error: `Wholesale price (${finalWholesale}) for variant must be greater than its cost price (${variantCost})` });
             return;
         }
 
@@ -345,8 +360,8 @@ export const createVariant = async (req: Request, res: Response): Promise<void> 
                 name,
                 barcode,
                 price: finalPrice,
-                retail: finalRetail == 0 ? finalPrice : finalRetail,
-                wholesale: finalWholesale == 0 ? finalPrice : finalWholesale,
+                retail: finalRetail,
+                wholesale: finalWholesale,
                 factor: f,
                 isDefault: false
             },
@@ -374,37 +389,55 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
         if (!variant) { res.status(404).json({ error: "Variant not found" }); return; }
 
         const isUpdatingDefault = isDefault ?? variant.isDefault;
-        const f = factor ?? variant.factor ?? 1;
+        const f = factor !== undefined && factor !== null && factor !== "" ? Number(factor) : (variant.factor ?? 1);
 
-        let finalPrice = price ?? variant.price;
-        let finalRetail = retail === 0 ? finalPrice : (retail ?? variant.retail ?? finalPrice);
-        let finalWholesale = wholesale === 0 ? finalPrice : (wholesale ?? variant.wholesale ?? finalPrice);
+        const defaultVariant = await prisma.productVariant.findFirst({
+            where: { productId: variant.productId, isDefault: true }
+        });
 
-        if (!isUpdatingDefault) {
-            const defaultVariant = await prisma.productVariant.findFirst({
-                where: { productId: variant.productId, isDefault: true }
-            });
-            if (defaultVariant) {
-                finalPrice = defaultVariant.price * f;
-                finalRetail = (defaultVariant.retail ?? defaultVariant.price) * f;
-                finalWholesale = (defaultVariant.wholesale ?? defaultVariant.price) * f;
-            }
+        let finalPrice: number;
+        if (price !== undefined && price !== null && price !== "") {
+            finalPrice = Number(price);
+        } else if (!isUpdatingDefault && factor !== undefined && defaultVariant) {
+            finalPrice = round2(defaultVariant.price * f);
+        } else {
+            finalPrice = variant.price;
+        }
+
+        let finalRetail: number | null;
+        if (retail === null || retail === "") {
+            finalRetail = null;
+        } else if (retail !== undefined && retail !== null) {
+            finalRetail = Number(retail);
+        } else if (!isUpdatingDefault && factor !== undefined && defaultVariant && defaultVariant.retail != null) {
+            finalRetail = round2(defaultVariant.retail * f);
+        } else {
+            finalRetail = variant.retail;
+        }
+
+        let finalWholesale: number | null;
+        if (wholesale === null || wholesale === "") {
+            finalWholesale = null;
+        } else if (wholesale !== undefined && wholesale !== null) {
+            finalWholesale = Number(wholesale);
+        } else if (!isUpdatingDefault && factor !== undefined && defaultVariant && defaultVariant.wholesale != null) {
+            finalWholesale = round2(defaultVariant.wholesale * f);
+        } else {
+            finalWholesale = variant.wholesale;
         }
 
         const variantCost = round2(variant.product.avgCostPrice * f);
-        const resolvedRetail = finalRetail == 0 ? finalPrice : finalRetail;
-        const resolvedWholesale = finalWholesale == 0 ? finalPrice : finalWholesale;
 
         if (finalPrice <= variantCost) {
             res.status(400).json({ error: `Price (${finalPrice}) for variant must be greater than its cost price (${variantCost})` });
             return;
         }
-        if (resolvedRetail > 0 && resolvedRetail <= variantCost) {
-            res.status(400).json({ error: `Retail price (${resolvedRetail}) for variant must be greater than its cost price (${variantCost})` });
+        if (finalRetail !== null && finalRetail > 0 && finalRetail <= variantCost) {
+            res.status(400).json({ error: `Retail price (${finalRetail}) for variant must be greater than its cost price (${variantCost})` });
             return;
         }
-        if (resolvedWholesale > 0 && resolvedWholesale <= variantCost) {
-            res.status(400).json({ error: `Wholesale price (${resolvedWholesale}) for variant must be greater than its cost price (${variantCost})` });
+        if (finalWholesale !== null && finalWholesale > 0 && finalWholesale <= variantCost) {
+            res.status(400).json({ error: `Wholesale price (${finalWholesale}) for variant must be greater than its cost price (${variantCost})` });
             return;
         }
 
@@ -414,18 +447,18 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
             });
             for (const other of otherVariants) {
                 const costOther = round2(variant.product.avgCostPrice * other.factor);
-                const priceOther = finalPrice * other.factor;
-                const resolvedRetailOther = (resolvedRetail || finalPrice) * other.factor;
-                const resolvedWholesaleOther = (resolvedWholesale || finalPrice) * other.factor;
+                const priceOther = round2(finalPrice * other.factor);
+                const resolvedRetailOther = finalRetail != null ? round2(finalRetail * other.factor) : null;
+                const resolvedWholesaleOther = finalWholesale != null ? round2(finalWholesale * other.factor) : null;
                 if (priceOther <= costOther) {
                     res.status(400).json({ error: `Updating this default variant makes the price of other variant '${other.name}' (${priceOther}) less than or equal to its cost price (${costOther})` });
                     return;
                 }
-                if (resolvedRetailOther > 0 && resolvedRetailOther <= costOther) {
+                if (resolvedRetailOther !== null && resolvedRetailOther > 0 && resolvedRetailOther <= costOther) {
                     res.status(400).json({ error: `Updating this default variant makes the retail price of other variant '${other.name}' (${resolvedRetailOther}) less than or equal to its cost price (${costOther})` });
                     return;
                 }
-                if (resolvedWholesaleOther > 0 && resolvedWholesaleOther <= costOther) {
+                if (resolvedWholesaleOther !== null && resolvedWholesaleOther > 0 && resolvedWholesaleOther <= costOther) {
                     res.status(400).json({ error: `Updating this default variant makes the wholesale price of other variant '${other.name}' (${resolvedWholesaleOther}) less than or equal to its cost price (${costOther})` });
                     return;
                 }
@@ -435,11 +468,11 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
         const updated = await prisma.productVariant.update({
             where: { id },
             data: {
-                name,
-                barcode,
+                name: name ?? variant.name,
+                barcode: barcode ?? variant.barcode,
                 price: finalPrice,
-                retail: finalRetail == 0 ? finalPrice : finalRetail,
-                wholesale: finalWholesale == 0 ? finalPrice : finalWholesale,
+                retail: finalRetail,
+                wholesale: finalWholesale,
                 factor: f,
                 isDefault: isUpdatingDefault
             },
@@ -453,9 +486,9 @@ export const updateVariant = async (req: Request, res: Response): Promise<void> 
                 await prisma.productVariant.update({
                     where: { id: other.id },
                     data: {
-                        price: updated.price * other.factor,
-                        retail: (updated.retail ?? updated.price) * other.factor,
-                        wholesale: (updated.wholesale ?? updated.price) * other.factor,
+                        price: round2(updated.price * other.factor),
+                        retail: updated.retail != null ? round2(updated.retail * other.factor) : null,
+                        wholesale: updated.wholesale != null ? round2(updated.wholesale * other.factor) : null,
                     }
                 });
             }
