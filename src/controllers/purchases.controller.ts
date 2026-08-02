@@ -7,14 +7,50 @@ export const listPurchases = async (req: Request, res: Response): Promise<void> 
     const where: any = {};
     if (req.query.supplierId) where.supplierId = parseInt(req.query.supplierId as string);
     if (req.query.userId) where.userId = parseInt(req.query.userId as string);
+
     // type=RETURN → only transactions with negative totalAmount (returns)
     // type=PURCHASE → only positive totalAmount (regular purchases)
     if (req.query.type === 'RETURN') where.totalAmount = { lt: 0 };
     else if (req.query.type === 'PURCHASE') where.totalAmount = { gte: 0 };
+
     if (req.query.from || req.query.to) {
         where.date = {};
         if (req.query.from) where.date.gte = new Date(`${req.query.from}T00:00:00.000`);
         if (req.query.to) where.date.lte = new Date(`${req.query.to}T23:59:59.999`);
+    }
+
+    const qRaw = (req.query.q ?? req.query.search) as string | undefined;
+    if (qRaw && qRaw.trim()) {
+        const q = qRaw.trim();
+        const cleanIdStr = q.replace(/[^0-9]/g, '');
+        const numericId = cleanIdStr.length > 0 && !isNaN(Number(cleanIdStr)) ? Number(cleanIdStr) : null;
+
+        const OR: any[] = [
+            { invoiceNo: { contains: q, mode: 'insensitive' } },
+            { supplier: { name: { contains: q, mode: 'insensitive' } } },
+            { supplier: { phone: { contains: q, mode: 'insensitive' } } },
+            { note: { contains: q, mode: 'insensitive' } },
+            { user: { name: { contains: q, mode: 'insensitive' } } },
+            {
+                items: {
+                    some: {
+                        product: {
+                            OR: [
+                                { name: { contains: q, mode: 'insensitive' } },
+                                { code: { contains: q, mode: 'insensitive' } }
+                            ]
+                        }
+                    }
+                }
+            }
+        ];
+
+        if (numericId !== null) {
+            OR.push({ id: numericId });
+            OR.push({ parentPurchaseId: numericId });
+        }
+
+        where.OR = OR;
     }
 
     try {
