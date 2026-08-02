@@ -5,6 +5,7 @@ import { getPaginationParams, createPaginatedResponse, round2 } from "../utils";
 export const listPurchases = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
     const where: any = {};
+    if (req.query.id) where.id = parseInt(req.query.id as string);
     if (req.query.supplierId) where.supplierId = parseInt(req.query.supplierId as string);
     if (req.query.userId) where.userId = parseInt(req.query.userId as string);
 
