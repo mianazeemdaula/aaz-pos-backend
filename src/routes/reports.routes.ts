@@ -21,6 +21,7 @@ import {
     getPurchaseOrderRecommendationPDF,
     getOverallBusinessReportPDF,
     getOverallPayablesReceivablesReportPDF,
+    getCostAboveSalePriceReportPDF,
 } from "../controllers/reports.controller";
 
 const router = Router();
@@ -37,6 +38,7 @@ router.get("/purchases", getPurchasesReportPDF);
 router.get("/detailed-purchases", getSupplierDetailedPurchasesReportPDF);
 router.get("/purchase-order-recommendation", getPurchaseOrderRecommendationPDF);
 router.get("/inventory", getInventoryReportPDF);
+router.get("/cost-above-sale-price", getCostAboveSalePriceReportPDF);
 router.get("/expenses", getExpensesReportPDF);
 router.get("/customer-balances", getCustomerBalancesReportPDF);
 router.get("/supplier-balances", getSupplierBalancesReportPDF);

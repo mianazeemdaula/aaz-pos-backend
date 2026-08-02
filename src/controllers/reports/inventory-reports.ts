@@ -272,3 +272,175 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
         res.status(500).json({ error: "Failed to generate stock report PDF" });
     }
 };
+
+export const getCostAboveSalePriceReportPDF = async (req: Request, res: Response): Promise<void> => {
+    try {
+        req.setTimeout(120_000);
+
+        const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
+        const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
+
+        const whereClause: any = { active: true, isService: false };
+        if (categoryId) {
+            const categoryIds = await getCategoryIdsRecursively(categoryId);
+            whereClause.categoryId = { in: categoryIds };
+        }
+        if (brandId) {
+            whereClause.brandId = brandId;
+        }
+
+        const products = await prisma.product.findMany({
+            where: whereClause,
+            include: {
+                category: { select: { name: true } },
+                brand: { select: { name: true } },
+                variants: { select: { id: true, name: true, barcode: true, price: true, retail: true, wholesale: true, factor: true, isDefault: true } },
+            },
+            orderBy: { name: "asc" },
+        });
+
+        interface LossRow {
+            sno: number;
+            productName: string;
+            variantName: string;
+            barcode: string;
+            category: string;
+            brand: string;
+            unitCost: number;
+            sellingPrice: number;
+            lossPerUnit: number;
+            stock: number;
+            potentialLoss: number;
+        }
+
+        const lossRows: LossRow[] = [];
+        let totalPotentialLoss = 0;
+
+        for (const p of products) {
+            const baseAvgCost = p.avgCostPrice || 0;
+            if (baseAvgCost <= 0) continue;
+
+            for (const v of p.variants) {
+                const unitCost = baseAvgCost * (v.factor || 1);
+                const sellingPrice = v.retail != null ? v.retail : v.price;
+                if (unitCost > sellingPrice) {
+                    const lossPerUnit = unitCost - sellingPrice;
+                    const potentialLoss = p.totalStock > 0 ? lossPerUnit * p.totalStock : 0;
+                    totalPotentialLoss += potentialLoss;
+
+                    lossRows.push({
+                        sno: lossRows.length + 1,
+                        productName: p.name,
+                        variantName: v.isDefault ? p.name : `${p.name} (${v.name})`,
+                        barcode: v.barcode ?? "—",
+                        category: p.category.name,
+                        brand: p.brand?.name ?? "N/A",
+                        unitCost,
+                        sellingPrice,
+                        lossPerUnit,
+                        stock: p.totalStock,
+                        potentialLoss,
+                    });
+                }
+            }
+        }
+
+        const meta: Record<string, string | number> = {
+            "Loss-Making Items": lossRows.length,
+            "Total Potential Loss": fmtCurrency(totalPotentialLoss),
+            "Generated": fmtDate(new Date()),
+        };
+
+        if (categoryId) {
+            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
+            if (cat) meta["Category"] = cat.name;
+        }
+        if (brandId) {
+            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
+            if (br) meta["Brand"] = br.name;
+        }
+
+        const qr = await generateQRBuffer(`Cost > Sale Price Report | Items: ${lossRows.length} | Potential Loss: ${fmtCurrency(totalPotentialLoss)}`);
+        const pdfGen = createPDFGenerator(pdfConfig(
+            "Cost > Sale Price Report",
+            "Products & Variants where Cost Price exceeds Sale Price",
+            meta,
+            "landscape",
+            "A4",
+            qr
+        ));
+        const doc = pdfGen.getDocument();
+
+        // Summary table
+        doc.x = doc.page.margins.left;
+        const summaryTable = doc.table({
+            columnStyles: ["*", "*", "*"],
+            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#fee2e2", fontSize: 10, fontStyle: "bold", textColor: "#991b1b" } : {},
+        });
+        summaryTable.row([
+            { text: "Loss-Making Items", align: { x: "left", y: "center" } },
+            { text: "Total Stock Impacted", align: { x: "left", y: "center" } },
+            { text: "Total Potential Inventory Loss", align: { x: "left", y: "center" } },
+        ]);
+        summaryTable.row([
+            { text: lossRows.length.toString(), align: { x: "left", y: "center" } },
+            { text: lossRows.reduce((s, r) => s + Math.max(0, r.stock), 0).toString(), align: { x: "left", y: "center" } },
+            { text: fmtCurrency(totalPotentialLoss), align: { x: "left", y: "center" } },
+        ]);
+        summaryTable.end();
+
+        pdfGen.moveDown(0.5);
+
+        // Details table
+        doc.x = doc.page.margins.left;
+        const table = doc.table({
+            columnStyles: [30, "*", 90, 80, 50, 70, 70, 70, 85],
+            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#1e293b", textColor: "#ffffff", fontSize: 9, fontStyle: "bold" } : { backgroundColor: row % 2 === 0 ? "#fef2f2" : "#ffffff" },
+        });
+
+        table.row([
+            { text: "#", align: { x: "center", y: "center" } },
+            { text: "Product / Variant", align: { x: "left", y: "center" } },
+            { text: "Category", align: { x: "left", y: "center" } },
+            { text: "Barcode", align: { x: "center", y: "center" } },
+            { text: "Stock", align: { x: "center", y: "center" } },
+            { text: "Unit Cost", align: { x: "right", y: "center" } },
+            { text: "Sale Price", align: { x: "right", y: "center" } },
+            { text: "Loss/Unit", align: { x: "right", y: "center" } },
+            { text: "Pot. Loss", align: { x: "right", y: "center" } },
+        ]);
+
+        if (lossRows.length === 0) {
+            table.row([
+                { text: "No products found with Cost > Sale Price.", colSpan: 9, align: { x: "center", y: "center" } }
+            ]);
+        } else {
+            lossRows.forEach((r) => {
+                table.row([
+                    { text: String(r.sno), align: { x: "center", y: "center" } },
+                    { text: r.variantName, align: { x: "left", y: "center" } },
+                    { text: r.category, align: { x: "left", y: "center" } },
+                    { text: r.barcode, align: { x: "center", y: "center" } },
+                    { text: String(r.stock), align: { x: "center", y: "center" } },
+                    { text: fmtCurrency(r.unitCost), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(r.sellingPrice), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(r.lossPerUnit), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(r.potentialLoss), align: { x: "right", y: "center" } },
+                ]);
+            });
+
+            doc.fontSize(9);
+            table.row([
+                { text: "Total Potential Loss", colSpan: 8, align: { x: "justify", y: "center" } },
+                { text: fmtCurrency(totalPotentialLoss), align: { x: "right", y: "center" } },
+            ]);
+        }
+
+        table.end();
+
+        await pdfGen.sendToResponse(res, `cost-above-sale-price-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+    } catch (error) {
+        console.error("Cost > Sale Price report PDF error:", error);
+        res.status(500).json({ error: "Failed to generate Cost > Sale Price report PDF" });
+    }
+};
