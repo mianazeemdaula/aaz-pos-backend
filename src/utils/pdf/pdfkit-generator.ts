@@ -1,7 +1,12 @@
 import PDFDocument from "pdfkit";
 import { Response } from "express";
 import { PDFKitOptions, HeaderOptions, FooterOptions, PDFDocumentType } from "./pdfkit-types";
-import { generateHeader, generateFooter } from "./pdfkit-components";
+import {
+    generateHeader,
+    generateFooter,
+    DEFAULT_FOOTER_HEIGHT,
+    FOOTER_CONTENT_GAP,
+} from "./pdfkit-components";
 import fs from "fs";
 import path from "path";
 import {
@@ -35,22 +40,40 @@ export class PDFKitGenerator {
     private contentStartY: number = 0;
     private contentEndY: number = 0;
     private pageNumbers: number[] = [];
+    /** Bottom margin the caller asked for, excluding the reserved footer band. */
+    private physicalBottomMargin: number = 0;
+    /** Vertical space kept clear at the bottom of every page for the footer. */
+    private footerReserve: number = 0;
 
     constructor(config: PDFGeneratorConfig = {}) {
         this.config = config;
 
+        const requestedMargins = config.pdfOptions?.margins || {
+            top: config.header ? 120 : 50,
+            bottom: config.footer ? 80 : 50,
+            left: 50,
+            right: 50,
+        };
+
+        // Reserve the footer band inside the bottom margin. PDFKit breaks a page when content
+        // would cross page.maxY() (= height - margins.bottom), so inflating the bottom margin
+        // is what makes body text and tables move to the next page once the usable area of the
+        // current one is full, instead of running down over the footer.
+        this.physicalBottomMargin = requestedMargins.bottom;
+        this.footerReserve = config.footer
+            ? (config.footer.height || DEFAULT_FOOTER_HEIGHT) + FOOTER_CONTENT_GAP
+            : 0;
+
         const pdfOptions = {
             size: config.pdfOptions?.size || "A4",
-            margins: config.pdfOptions?.margins || {
-                top: config.header ? 120 : 50,
-                bottom: config.footer ? 80 : 50,
-                left: 50,
-                right: 50,
-            },
             bufferPages: true,
             layout: config.pdfOptions?.orientation || "portrait",
             autoFirstPage: false,
             ...config.pdfOptions,
+            margins: {
+                ...requestedMargins,
+                bottom: this.physicalBottomMargin + this.footerReserve,
+            },
         };
 
         this.doc = new PDFDocument(pdfOptions);
@@ -147,6 +170,35 @@ export class PDFKitGenerator {
     }
 
     /**
+     * Stamp the footer onto every buffered page.
+     *
+     * Must run after all content is laid out (that is when the total page count is known) and
+     * before doc.end(). The page range is re-read on every iteration so that a page added
+     * while stamping — which should no longer happen, but is cheap to guard against — can
+     * never leave a page without a footer or loop forever.
+     */
+    private renderFooters(): void {
+        if (!this.config.footer) return;
+
+        const range = this.doc.bufferedPageRange();
+        const totalPages = range.count;
+
+        for (let i = 0; i < totalPages; i++) {
+            const pageIndex = range.start + i;
+            if (pageIndex >= this.doc.bufferedPageRange().count) break;
+
+            this.doc.switchToPage(pageIndex);
+            generateFooter(
+                this.doc,
+                this.config.footer,
+                i + 1,
+                totalPages,
+                this.physicalBottomMargin
+            );
+        }
+    }
+
+    /**
      * Get the PDFDocument instance
      */
     getDocument(): PDFDocumentType {
@@ -198,15 +250,7 @@ export class PDFKitGenerator {
         return new Promise((resolve, reject) => {
             try {
                 // Add footers to all pages before finalizing
-                if (this.config.footer) {
-                    const range = this.doc.bufferedPageRange();
-                    const totalPages = range.count;
-                    console.log(`Total pages: ${totalPages}`);
-                    for (let i = 0; i < totalPages; i++) {
-                        this.doc.switchToPage(i);
-                        generateFooter(this.doc, this.config.footer, i + 1, totalPages);
-                    }
-                }
+                this.renderFooters();
 
                 // Set response headers
                 res.setHeader("Content-Type", "application/pdf");
@@ -237,15 +281,7 @@ export class PDFKitGenerator {
     async toBuffer(): Promise<Buffer> {
         return new Promise((resolve, reject) => {
             // Add footers to all pages before finalizing
-            if (this.config.footer) {
-                const range = this.doc.bufferedPageRange();
-                const totalPages = range.count;
-
-                for (let i = 0; i < totalPages; i++) {
-                    this.doc.switchToPage(i);
-                    generateFooter(this.doc, this.config.footer, i + 1, totalPages);
-                }
-            }
+            this.renderFooters();
 
             const chunks: Buffer[] = [];
 
@@ -271,15 +307,7 @@ export class PDFKitGenerator {
     async saveToFile(filePath: string): Promise<void> {
         return new Promise((resolve, reject) => {
             // Add footers to all pages before finalizing
-            if (this.config.footer) {
-                const range = this.doc.bufferedPageRange();
-                const totalPages = range.count;
-
-                for (let i = 0; i < totalPages; i++) {
-                    this.doc.switchToPage(i);
-                    generateFooter(this.doc, this.config.footer, i + 1, totalPages);
-                }
-            }
+            this.renderFooters();
 
             const stream = fs.createWriteStream(filePath);
 

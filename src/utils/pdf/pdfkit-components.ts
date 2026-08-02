@@ -447,23 +447,44 @@ export function generateTable(
     return yPos;
 }
 
+/** Default height of the footer band, in points. */
+export const DEFAULT_FOOTER_HEIGHT = 20;
+
+/** Breathing room between the end of the body content and the footer's top border. */
+export const FOOTER_CONTENT_GAP = 6;
+
 /**
  * Generate Footer Component (called for each page)
+ *
+ * `pageBottomMargin` is the *physical* bottom margin of the page (i.e. the margin the
+ * caller asked for, before the footer band was reserved on top of it). The generator
+ * inflates `doc.page.margins.bottom` so body content stops above the footer; passing the
+ * original value here keeps the footer pinned to the bottom of the sheet instead of
+ * drifting up by its own height.
  */
 export function generateFooter(
     doc: PDFDocumentType,
     options: FooterOptions,
     pageNumber: number,
-    totalPages: number
+    totalPages: number,
+    pageBottomMargin?: number
 ): void {
     // Save current position
     const savedY = doc.y;
     const savedX = doc.x;
+    const savedBottomMargin = doc.page.margins.bottom;
 
+    // Drawing inside the bottom margin would put doc.y past page.maxY(), and PDFKit's line
+    // wrapper reacts to that by starting a new page — which is how the footer used to spill
+    // onto a page of its own. Zeroing the bottom margin for the duration of the draw pushes
+    // maxY() to the physical page edge so no break can be triggered.
+    doc.page.margins.bottom = 0;
+
+    const footerHeight = options.height || DEFAULT_FOOTER_HEIGHT;
+    const bottomMargin = pageBottomMargin ?? savedBottomMargin;
     const startX = doc.page.margins.left;
     const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-    const footerY = doc.page.height - doc.page.margins.bottom - (options.height || 20);
-    const footerHeight = options.height || 20;
+    const footerY = doc.page.height - bottomMargin - footerHeight;
 
     // Background
     if (options.backgroundColor) {
@@ -477,15 +498,23 @@ export function generateFooter(
         .lineTo(startX + pageWidth, footerY)
         .stroke("#cccccc");
 
-    const textY = footerY + 10;
     applyFont(doc, options.font || { size: 8, color: "#666666" });
+
+    // Centre the text inside the band using the real line height of the resolved font.
+    // Custom (Urdu/theme) faces have taller metrics than Helvetica, and a hard-coded offset
+    // is what pushed the text past the page edge in the first place.
+    const lineHeight = doc.currentLineHeight(true);
+    const textY = footerY + Math.max(2, (footerHeight - lineHeight) / 2);
+
+    // `height` caps the wrapper's maxY to the band, so a page break can never be requested.
+    const textOptions = { height: footerHeight, lineBreak: false as const };
 
     // Left text
     if (options.leftText) {
         doc.text(options.leftText, startX, textY, {
+            ...textOptions,
             width: pageWidth / 3 - 10,
             align: "left",
-            lineBreak: false,
         });
     }
 
@@ -502,20 +531,21 @@ export function generateFooter(
     const fullCenterText = centerText + (centerText && pageNumberText ? " | " : "") + pageNumberText;
 
     doc.text(fullCenterText, startX + pageWidth / 3, textY, {
+        ...textOptions,
         width: pageWidth / 3 - 10,
         align: "center",
-        lineBreak: false,
     });
 
     // Right text
     const rightText = options.rightText || dayjs().format("DD MMM YYYY");
     doc.text(rightText, startX + (2 * pageWidth) / 3, textY, {
+        ...textOptions,
         width: pageWidth / 3 - 10,
         align: "right",
-        lineBreak: false,
     });
 
-    // Restore position to prevent page breaks
+    // Restore position and margin to prevent page breaks
+    doc.page.margins.bottom = savedBottomMargin;
     doc.x = savedX;
     doc.y = savedY;
 }
