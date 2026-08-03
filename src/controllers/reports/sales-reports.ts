@@ -195,14 +195,27 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
     try {
         const sales = await prisma.sale.findMany({
             where,
+            orderBy: { createdAt: "desc" },
             include: {
                 user: { select: { id: true, name: true, role: true } },
+                customer: { select: { id: true, name: true, phone: true } },
                 items: { select: { quantity: true, avgCostPrice: true, totalPrice: true, discount: true } },
                 payments: { include: { account: { select: { name: true } } } },
             },
         });
 
         // Group sales by user
+        interface CreditSaleItem {
+            id: number;
+            invoiceNo: string;
+            date: Date;
+            customerName: string;
+            customerPhone: string;
+            totalAmount: number;
+            paidAmount: number;
+            dueAmount: number;
+        }
+
         const cashierMap = new Map<number, {
             name: string;
             role: string;
@@ -211,7 +224,9 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
             totalCOGS: number;
             totalDiscount: number;
             grossProfit: number;
+            totalCreditDue: number;
             payments: Record<string, number>;
+            creditSales: CreditSaleItem[];
         }>();
 
         for (const sale of sales) {
@@ -228,7 +243,9 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                     totalCOGS: 0,
                     totalDiscount: 0,
                     grossProfit: 0,
+                    totalCreditDue: 0,
                     payments: {},
+                    creditSales: [],
                 });
             }
 
@@ -248,6 +265,22 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                 const accName = p.account?.name || "Cash";
                 const netAmount = p.amount - (p.changeAmount || 0);
                 data.payments[accName] = (data.payments[accName] || 0) + netAmount;
+            }
+
+            // Track credit sales (sales with remaining due amount)
+            const dueAmount = sale.totalAmount - sale.paidAmount;
+            if (sale.totalAmount > 0 && dueAmount > 0.001) {
+                data.totalCreditDue += dueAmount;
+                data.creditSales.push({
+                    id: sale.id,
+                    invoiceNo: sale.taxInvoiceId || `#${sale.id}`,
+                    date: sale.createdAt,
+                    customerName: sale.customer?.name || "Walk-in Customer",
+                    customerPhone: sale.customer?.phone || "",
+                    totalAmount: sale.totalAmount,
+                    paidAmount: sale.paidAmount,
+                    dueAmount: dueAmount,
+                });
             }
         }
 
@@ -304,13 +337,14 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
 
                 // Summary table
                 const sumTable = doc.table({
-                    columnStyles: [110, 110, 110, 110, 110],
+                    columnStyles: [80, 95, 85, 95, 95, 100],
                     rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f8fafc", fontSize: 9, fontStyle: "bold" } : {},
                 });
                 sumTable.row([
                     { text: "Sales Count", align: { x: "left", y: "center" } },
                     { text: "Total Revenue", align: { x: "right", y: "center" } },
-                    { text: "Total Discounts", align: { x: "right", y: "center" } },
+                    { text: "Discounts", align: { x: "right", y: "center" } },
+                    { text: "Credit / Due", align: { x: "right", y: "center" } },
                     { text: "Total COGS", align: { x: "right", y: "center" } },
                     { text: "Gross Profit", align: { x: "right", y: "center" } },
                 ]);
@@ -318,6 +352,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                     { text: String(c.salesCount), align: { x: "left", y: "center" } },
                     { text: fmtCurrency(c.totalRevenue), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(c.totalDiscount), align: { x: "right", y: "center" } },
+                    { text: fmtCurrency(c.totalCreditDue), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(c.totalCOGS), align: { x: "right", y: "center" } },
                     { text: fmtCurrency(c.grossProfit), align: { x: "right", y: "center" } },
                 ]);
@@ -351,6 +386,66 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
                     ]);
                 });
                 payTable.end();
+
+                pdfGen.moveDown(0.3);
+
+                // Credit Sales Details Sub-table
+                doc.fontSize(9).font("Helvetica-Bold").fillColor("#475569").text("Credit Sales Details (On Account / Unpaid Invoices):");
+                pdfGen.moveDown(0.15);
+                doc.font('Helvetica').fontSize(9);
+
+                if (c.creditSales.length === 0) {
+                    doc.fontSize(8.5).fillColor("#64748b").text("No credit sales recorded for this cashier in the selected period.");
+                } else {
+                    const creditTable = doc.table({
+                        columnStyles: [80, 85, 145, 80, 80, 80],
+                        rowStyles: (row: number) => {
+                            if (row === 0) return { backgroundColor: "#f1f5f9", fontSize: 8, fontStyle: "bold" };
+                            if (row === c.creditSales.length + 1) return { backgroundColor: "#f8fafc", fontSize: 8, fontStyle: "bold" };
+                            return { fontSize: 8 };
+                        },
+                    });
+
+                    creditTable.row([
+                        { text: "Invoice #", align: { x: "left", y: "center" } },
+                        { text: "Date", align: { x: "left", y: "center" } },
+                        { text: "Customer", align: { x: "left", y: "center" } },
+                        { text: "Total Amount", align: { x: "right", y: "center" } },
+                        { text: "Paid Amount", align: { x: "right", y: "center" } },
+                        { text: "Credit Due", align: { x: "right", y: "center" } },
+                    ]);
+
+                    let sumTotalAmt = 0;
+                    let sumPaidAmt = 0;
+                    let sumDueAmt = 0;
+
+                    for (const cs of c.creditSales) {
+                        sumTotalAmt += cs.totalAmount;
+                        sumPaidAmt += cs.paidAmount;
+                        sumDueAmt += cs.dueAmount;
+
+                        creditTable.row([
+                            { text: cs.invoiceNo, align: { x: "left", y: "center" } },
+                            { text: dayjs(cs.date).format("YYYY-MM-DD HH:mm"), align: { x: "left", y: "center" } },
+                            { text: cs.customerPhone ? `${cs.customerName} (${cs.customerPhone})` : cs.customerName, align: { x: "left", y: "center" } },
+                            { text: fmtCurrency(cs.totalAmount), align: { x: "right", y: "center" } },
+                            { text: fmtCurrency(cs.paidAmount), align: { x: "right", y: "center" } },
+                            { text: fmtCurrency(cs.dueAmount), align: { x: "right", y: "center" } },
+                        ]);
+                    }
+
+                    // Summary row for credit sales
+                    creditTable.row([
+                        { text: "Total Credit Sales", align: { x: "left", y: "center" } },
+                        { text: "", align: { x: "left", y: "center" } },
+                        { text: `${c.creditSales.length} Credit Sale(s)`, align: { x: "left", y: "center" } },
+                        { text: fmtCurrency(sumTotalAmt), align: { x: "right", y: "center" } },
+                        { text: fmtCurrency(sumPaidAmt), align: { x: "right", y: "center" } },
+                        { text: fmtCurrency(sumDueAmt), align: { x: "right", y: "center" } },
+                    ]);
+
+                    creditTable.end();
+                }
 
                 // Draw a separator line between cashiers
                 pdfGen.moveDown(1.0);
