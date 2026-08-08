@@ -1,15 +1,20 @@
 /**
  * PDF Utilities
- * Export all PDF generation utilities and components
+ *
+ * Reports are described as a declarative spec (report-spec), rendered by
+ * report-renderer, and executed on a worker thread by pdf-worker-pool so
+ * document layout never blocks the API.
  */
 
-// PDFKit-based PDF generation (Native PDF)
-// Export types
-export type { PDFDocumentType, PDFKitOptions, FontConfig, PDFKitComponentContext, SignatureOptions } from "./pdfkit-types";
-// Export PDFKit components
-export { applyFont, generateSignatureSection } from "./pdfkit-components";
-// Export generator and fonts
-export * from "./pdfkit-generator";
-export * from "./pdfkit-fonts";
-
-
+export * from "./report-spec";
+export * from "./report-theme";
+export { renderReport, sendReport } from "./report";
+export { renderReportToBuffer } from "./report-renderer";
+export {
+    warmUpPdfWorkers,
+    shutdownPdfWorkers,
+    isThreadedRenderingEnabled,
+    getPoolSize,
+} from "./pdf-worker-pool";
+export { clearAssetCache } from "./report-assets";
+export { getReportFontTheme, clearReportFontThemeCache } from "./report-fonts";

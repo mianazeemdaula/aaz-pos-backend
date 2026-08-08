@@ -1,29 +1,108 @@
 import { Request, Response } from "express";
 import dayjs from "dayjs";
 import { prisma } from "../../prisma/prisma";
-import { generateSignatureSection } from "../../utils/pdf/pdfkit-components";
 import {
     fmtDate,
     fmtCurrency,
-    pdfConfig,
-    generateQRBuffer,
-    createPDFGenerator,
-    fonts,
-    logoPath,
-    readSettings
+    createReport,
+    reportFilename,
+    sendReport,
 } from "./helpers";
+import type { ReportBuilder } from "./helpers";
+import type { StatItem, TableCell } from "../../utils/pdf/report-spec";
+import type { Tone } from "../../utils/pdf/report-theme";
 import {
-    computeCustomerBalance,
-    computeSupplierBalance,
     computeAllCustomerBalances,
-    computeAllSupplierBalances
+    computeAllSupplierBalances,
 } from "../../utils/balance";
 
-export const getCustomerBalancesReportPDF = async (req: Request, res: Response): Promise<void> => {
+/* ------------------------------------------------------------------ */
+/* Shared ledger rendering                                             */
+/* ------------------------------------------------------------------ */
+
+interface LedgerRow {
+    createdAt: Date;
+    type: string;
+    reference: string | null;
+    note: string | null;
+    debit: number;
+    credit: number;
+    balance: number;
+}
+
+/**
+ * The four statement/ledger reports differ only in their labels and in which
+ * ledger table they read. Their layout is identical, so it lives here once.
+ */
+function appendLedger(
+    report: ReportBuilder,
+    rows: LedgerRow[],
+    totals: { openingBalance: number; totalDebit: number; totalCredit: number; closingBalance: number },
+    options: { showOpeningRow: boolean; openingDate?: string; debitLabel: string; creditLabel: string }
+): void {
+    report.section("Ledger", `${rows.length} entry(ies), oldest first`);
+
+    if (rows.length === 0 && !options.showOpeningRow) {
+        report.note("No ledger entries were recorded for the selected period.");
+        return;
+    }
+
+    const tableRows: TableCell[][] = [];
+
+    if (options.showOpeningRow) {
+        tableRows.push([
+            options.openingDate ?? "",
+            "OPENING BAL",
+            { text: "Opening Balance", bold: true },
+            "-",
+            "-",
+            { text: fmtCurrency(totals.openingBalance), align: "right", bold: true },
+        ]);
+    }
+
+    for (const row of rows) {
+        tableRows.push([
+            fmtDate(row.createdAt, "DD-MM-YYYY"),
+            row.type.replace(/_/g, " "),
+            row.reference ?? row.note ?? "-",
+            row.debit ? { text: fmtCurrency(row.debit), align: "right", tone: "danger" } : "-",
+            row.credit ? { text: fmtCurrency(row.credit), align: "right", tone: "success" } : "-",
+            { text: fmtCurrency(row.balance), align: "right" },
+        ]);
+    }
+
+    report.table({
+        columns: [
+            { label: "Date", width: 78, align: "center" },
+            { label: "Type", width: 96, align: "center" },
+            { label: "Reference / Note", width: "*" },
+            { label: options.debitLabel, width: 82, align: "right" },
+            { label: options.creditLabel, width: 82, align: "right" },
+            { label: "Balance", width: 88, align: "right" },
+        ],
+        rows: tableRows,
+        totalRow: [
+            { text: "Total", colSpan: 3 },
+            fmtCurrency(totals.totalDebit),
+            fmtCurrency(totals.totalCredit),
+            fmtCurrency(totals.closingBalance),
+        ],
+    });
+}
+
+function balanceTone(balance: number): Tone {
+    if (balance > 0) return "danger";
+    if (balance < 0) return "warning";
+    return "muted";
+}
+
+/* ------------------------------------------------------------------ */
+/* Balance summaries                                                   */
+/* ------------------------------------------------------------------ */
+
+export const getCustomerBalancesReportPDF = async (_req: Request, res: Response): Promise<void> => {
     try {
-        const activeCustomers = await prisma.customer.findMany({
-            where: { active: true },
-        });
+        const activeCustomers = await prisma.customer.findMany({ where: { active: true } });
 
         const balanceMap = await computeAllCustomerBalances();
         const customers = activeCustomers
@@ -34,92 +113,76 @@ export const getCustomerBalancesReportPDF = async (req: Request, res: Response):
         const totalReceivable = customers.filter((c) => c.balance > 0).reduce((s, c) => s + c.balance, 0);
         const totalOverpaid = customers.filter((c) => c.balance < 0).reduce((s, c) => s + Math.abs(c.balance), 0);
 
-        const rows = customers.map((c, i) => ({
-            sno: i + 1,
-            name: c.name,
-            phone: c.phone ?? "N/A",
-            address: c.address ?? "N/A",
-            creditLimit: c.creditLimit ?? 0,
-            balance: c.balance,
-            status: c.balance > 0 ? "Receivable" : "Overpaid",
-        }));
-
-        const custQr = await generateQRBuffer(`Customer Balances | Customers: ${customers.length} | Receivable: ${fmtCurrency(totalReceivable)}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Customer Balances Report", "Accounts Receivable", {
-                "Total Customers": customers.length,
-                "Total Receivable": fmtCurrency(totalReceivable),
-                "Total Overpaid": fmtCurrency(totalOverpaid),
-            }, undefined, undefined, custQr)
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Customer Balances",
+            subtitle: "Accounts receivable",
+            filename: reportFilename("customer-balances"),
+            filters: {
+                Customers: customers.length,
+                "As of": fmtDate(new Date()),
+            },
         });
-        summaryTable.row([
-            { text: "Total Customers", align: { x: "left", y: "center" } },
-            { text: "Total Receivable", align: { x: "left", y: "center" } },
-            { text: "Total Overpaid", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: customers.length.toString(), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalReceivable), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalOverpaid), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.5);
-
-        // Customer balances table — 7 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, "*", 85, 110, 85, 90, 75],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Customer Name", align: { x: "left", y: "center" } },
-            { text: "Phone", align: { x: "center", y: "center" } },
-            { text: "Address", align: { x: "left", y: "center" } },
-            { text: "Credit Limit", align: { x: "right", y: "center" } },
-            { text: "Balance", align: { x: "right", y: "center" } },
-            { text: "Status", align: { x: "center", y: "center" } },
+        report.stats([
+            { label: "Customers with Balance", value: String(customers.length), tone: "primary" },
+            { label: "Total Receivable", value: fmtCurrency(totalReceivable), tone: "danger", note: "owed to you" },
+            { label: "Total Overpaid", value: fmtCurrency(totalOverpaid), tone: "warning", note: "advance held" },
+            { label: "Net Position", value: fmtCurrency(totalReceivable - totalOverpaid), tone: "primary" },
         ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: row.name, align: { x: "left", y: "center" } },
-                { text: row.phone, align: { x: "center", y: "center" } },
-                { text: row.address, align: { x: "left", y: "center" } },
-                { text: row.creditLimit > 0 ? fmtCurrency(row.creditLimit) : "No Limit", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.balance), align: { x: "right", y: "center" } },
-                { text: row.status, align: { x: "center", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalReceivable - totalOverpaid), align: { x: "right", y: "center" } },
-            { text: "", align: { x: "center", y: "center" } },
-        ]);
-        table.end();
 
-        await pdfGen.sendToResponse(res, `customer-balances-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        report.section("Customer Balances", `${customers.length} record(s)`);
+
+        if (customers.length === 0) {
+            report.note("Every active customer is fully settled.");
+        } else {
+            const rowTones: (Tone | undefined)[] = [];
+            const rows: TableCell[][] = customers.map((c, i) => {
+                rowTones.push(undefined);
+                return [
+                    String(i + 1),
+                    c.name,
+                    c.phone ?? "N/A",
+                    c.address ?? "N/A",
+                    (c.creditLimit ?? 0) > 0 ? fmtCurrency(c.creditLimit) : "No Limit",
+                    { text: fmtCurrency(c.balance), align: "right" as const, tone: balanceTone(c.balance) },
+                    {
+                        text: c.balance > 0 ? "RECEIVABLE" : "OVERPAID",
+                        align: "center" as const,
+                        tone: c.balance > 0 ? ("danger" as const) : ("warning" as const),
+                    },
+                ];
+            });
+
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Customer", width: "*" },
+                    { label: "Phone", width: 84, align: "center" },
+                    { label: "Address", width: 116 },
+                    { label: "Credit Limit", width: 76, align: "right" },
+                    { label: "Balance", width: 82, align: "right" },
+                    { label: "Status", width: 76, align: "center" },
+                ],
+                rows,
+                rowTones,
+                totalRow: [
+                    { text: "Net Total", colSpan: 5 },
+                    fmtCurrency(totalReceivable - totalOverpaid),
+                    "",
+                ],
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Customer balances PDF error:", error);
         res.status(500).json({ error: "Failed to generate customer balances report PDF", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };
 
-export const getSupplierBalancesReportPDF = async (req: Request, res: Response): Promise<void> => {
+export const getSupplierBalancesReportPDF = async (_req: Request, res: Response): Promise<void> => {
     try {
-        const activeSuppliers = await prisma.supplier.findMany({
-            where: { active: true },
-        });
+        const activeSuppliers = await prisma.supplier.findMany({ where: { active: true } });
 
         const balanceMap = await computeAllSupplierBalances();
         const suppliers = activeSuppliers
@@ -130,80 +193,67 @@ export const getSupplierBalancesReportPDF = async (req: Request, res: Response):
         const totalPayable = suppliers.filter((s) => s.balance > 0).reduce((s, sup) => s + sup.balance, 0);
         const totalOverpaid = suppliers.filter((s) => s.balance < 0).reduce((s, sup) => s + Math.abs(sup.balance), 0);
 
-        const rows = suppliers.map((s, i) => ({
-            sno: i + 1,
-            name: s.name,
-            phone: s.phone ?? "N/A",
-            balance: s.balance,
-            status: s.balance > 0 ? "Payable" : "Overpaid",
-        }));
-
-        const suppQr = await generateQRBuffer(`Supplier Balances | Suppliers: ${suppliers.length} | Payable: ${fmtCurrency(totalPayable)}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Supplier Balances Report", "Accounts Payable", {
-                "Total Suppliers": suppliers.length,
-                "Total Payable": fmtCurrency(totalPayable),
-                "Total Overpaid": fmtCurrency(totalOverpaid),
-            }, undefined, undefined, suppQr)
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Supplier Balances",
+            subtitle: "Accounts payable",
+            filename: reportFilename("supplier-balances"),
+            filters: {
+                Suppliers: suppliers.length,
+                "As of": fmtDate(new Date()),
+            },
         });
-        summaryTable.row([
-            { text: "Total Suppliers", align: { x: "left", y: "center" } },
-            { text: "Total Payable", align: { x: "left", y: "center" } },
-            { text: "Total Overpaid", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: suppliers.length.toString(), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalPayable), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalOverpaid), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.5);
-
-        // Supplier balances table — 5 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [35, "*", 120, 110, 90],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Supplier Name", align: { x: "left", y: "center" } },
-            { text: "Phone", align: { x: "center", y: "center" } },
-            { text: "Balance", align: { x: "right", y: "center" } },
-            { text: "Status", align: { x: "center", y: "center" } },
+        report.stats([
+            { label: "Suppliers with Balance", value: String(suppliers.length), tone: "primary" },
+            { label: "Total Payable", value: fmtCurrency(totalPayable), tone: "danger", note: "you owe" },
+            { label: "Total Overpaid", value: fmtCurrency(totalOverpaid), tone: "warning", note: "advance paid" },
+            { label: "Net Position", value: fmtCurrency(totalPayable - totalOverpaid), tone: "primary" },
         ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: row.name, align: { x: "left", y: "center" } },
-                { text: row.phone, align: { x: "center", y: "center" } },
-                { text: fmtCurrency(row.balance), align: { x: "right", y: "center" } },
-                { text: row.status, align: { x: "center", y: "center" } },
+
+        report.section("Supplier Balances", `${suppliers.length} record(s)`);
+
+        if (suppliers.length === 0) {
+            report.note("Every active supplier is fully settled.");
+        } else {
+            const rows: TableCell[][] = suppliers.map((s, i) => [
+                String(i + 1),
+                s.name,
+                s.phone ?? "N/A",
+                { text: fmtCurrency(s.balance), align: "right" as const, tone: balanceTone(s.balance) },
+                {
+                    text: s.balance > 0 ? "PAYABLE" : "OVERPAID",
+                    align: "center" as const,
+                    tone: s.balance > 0 ? ("danger" as const) : ("warning" as const),
+                },
             ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 3, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalPayable - totalOverpaid), align: { x: "right", y: "center" } },
-            { text: "", align: { x: "center", y: "center" } },
-        ]);
-        table.end();
 
-        await pdfGen.sendToResponse(res, `supplier-balances-${dayjs().format("YYYY-MM-DD")}.pdf`);
+            report.table({
+                columns: [
+                    { label: "#", width: 32, align: "center" },
+                    { label: "Supplier", width: "*" },
+                    { label: "Phone", width: 120, align: "center" },
+                    { label: "Balance", width: 110, align: "right" },
+                    { label: "Status", width: 90, align: "center" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Net Total", colSpan: 3 },
+                    fmtCurrency(totalPayable - totalOverpaid),
+                    "",
+                ],
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Supplier balances PDF error:", error);
         res.status(500).json({ error: "Failed to generate supplier balances report PDF", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };
+
+/* ------------------------------------------------------------------ */
+/* Statements                                                          */
+/* ------------------------------------------------------------------ */
 
 export const getCustomerStatementPDF = async (req: Request, res: Response): Promise<void> => {
     const customerId = Number(req.params.customerId);
@@ -225,160 +275,86 @@ export const getCustomerStatementPDF = async (req: Request, res: Response): Prom
         let openingBalance = 0;
         if (from) {
             const aggBefore = await prisma.customerLedger.aggregate({
-                where: {
-                    customerId,
-                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
-                },
+                where: { customerId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
                 _sum: { debit: true, credit: true },
             });
             openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
         }
 
-        // Determine debit/credit direction by type
+        // Determine debit/credit direction by type.
         const debitTypes = ["SALE", "ADJUSTMENT_DR"];
         let runningBalance = openingBalance;
-        const ledgerRows = ledgerEntries.map((entry) => {
+        const ledgerRows: LedgerRow[] = ledgerEntries.map((entry) => {
             const isDebit = debitTypes.includes(entry.type);
             const debit = isDebit ? entry.amount : 0;
             const credit = !isDebit ? entry.amount : 0;
             runningBalance += debit - credit;
-            return { ...entry, debit, credit, runningBalance };
+            return {
+                createdAt: entry.createdAt,
+                type: entry.type,
+                reference: entry.reference,
+                note: entry.note,
+                debit,
+                credit,
+                balance: runningBalance,
+            };
         });
 
         const totalDebit = ledgerRows.reduce((s, r) => s + r.debit, 0);
         const totalCredit = ledgerRows.reduce((s, r) => s + r.credit, 0);
         const closingBalance = runningBalance;
 
-        // Total sales and payments in period
         const salesCount = ledgerEntries.filter((e) => e.type === "SALE").length;
         const paymentsCount = ledgerEntries.filter((e) => e.type === "PAYMENT").length;
 
-        const reportFonts = fonts();
-        const company = readSettings();
-        const pdfGen = createPDFGenerator({
-            fontRegistrations: reportFonts.registrations,
-            fontFamilyMap: reportFonts.aliasMap,
-            pdfOptions: {
-                size: "A4",
-                margins: { top: 10, bottom: 10, left: 20, right: 20 },
-            },
-            header: {
-                title: "Customer Account Statement",
-                subtitle: `Customer: ${customer.name}`,
-                logo: { path: logoPath, width: 60, height: 60 },
-                companyName: (company.businessName as string) || undefined,
-                address: (company.address as string) || undefined,
-                phone: (company.phone as string) || undefined,
-                showDate: true,
-                titleFont: { size: 16 },
-                subtitleFont: { size: 10, color: "#666666" },
-                filterInfo: {
-                    "From": from ? fmtDate(from as string) : "All",
-                    "To": to ? fmtDate(to as string) : "Now",
-                },
-            },
-            footer: {
-                leftText: (company.businessName as string) || "POS System",
-                centerText: "Customer Statement",
-                showPageNumber: true,
-                font: { size: 8, color: "#666666" },
+        const report = createReport({
+            title: "Customer Statement",
+            subtitle: customer.name,
+            filename: `customer-statement-${customer.name}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            filters: {
+                Customer: customer.name,
+                Phone: customer.phone ?? "N/A",
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
             },
         });
 
-        const doc = pdfGen.getDocument();
-
-        // Customer info
-        doc.x = doc.page.margins.left;
-        const infoTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        infoTable.row([
-            { text: "Customer Name", align: { x: "left", y: "center" } },
-            { text: "Phone", align: { x: "left", y: "center" } },
-            { text: "Address", align: { x: "left", y: "center" } },
-            { text: "Credit Limit", align: { x: "left", y: "center" } },
+        report.stats([
+            { label: "Opening Balance", value: fmtCurrency(openingBalance), tone: "muted" },
+            { label: "Total Invoiced", value: fmtCurrency(totalDebit), tone: "primary", note: `${salesCount} sales` },
+            { label: "Total Paid", value: fmtCurrency(totalCredit), tone: "success", note: `${paymentsCount} payments` },
+            {
+                label: "Closing Balance",
+                value: fmtCurrency(closingBalance),
+                tone: balanceTone(closingBalance),
+                note: closingBalance > 0 ? "receivable" : undefined,
+            },
+            {
+                label: "Credit Limit",
+                value: customer.creditLimit != null ? fmtCurrency(customer.creditLimit) : "No Limit",
+                tone: "muted",
+            },
         ]);
-        infoTable.row([
-            { text: customer.name, align: { x: "left", y: "center" } },
-            { text: customer.phone ?? "N/A", align: { x: "left", y: "center" } },
-            { text: customer.address ?? "N/A", align: { x: "left", y: "center" } },
-            { text: customer.creditLimit != null ? fmtCurrency(customer.creditLimit) : "No Limit", align: { x: "left", y: "center" } },
+
+        appendLedger(
+            report,
+            ledgerRows,
+            { openingBalance, totalDebit, totalCredit, closingBalance },
+            {
+                showOpeningRow: Boolean(from),
+                openingDate: from ? fmtDate(from as string, "DD-MM-YYYY") : undefined,
+                debitLabel: "Invoiced",
+                creditLabel: "Paid",
+            }
+        );
+
+        report.signatures([
+            { label: "Customer Signature", name: "_________________", title: customer.name },
+            { label: "Accountant", name: "_________________", title: "Accounts Dept." },
+            { label: "Manager", name: "_________________", title: "General Manager" },
         ]);
-        infoTable.end();
 
-        pdfGen.moveDown(0.4);
-
-        // Account summary
-        doc.x = doc.page.margins.left;
-        const acctTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        acctTable.row([
-            { text: "Total Invoiced", align: { x: "left", y: "center" } },
-            { text: "Total Paid", align: { x: "left", y: "center" } },
-            { text: "Closing Balance", align: { x: "left", y: "center" } },
-            { text: "Transactions", align: { x: "left", y: "center" } },
-        ]);
-        acctTable.row([
-            { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "left", y: "center" } },
-            { text: `${salesCount} sales, ${paymentsCount} payments`, align: { x: "left", y: "center" } },
-        ]);
-        acctTable.end();
-
-        pdfGen.moveDown(0.5);
-
-        // Ledger table — 6 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [80, 90, "*", 80, 80, 85],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Type", align: { x: "center", y: "center" } },
-            { text: "Reference / Note", align: { x: "left", y: "center" } },
-            { text: "Debit", align: { x: "right", y: "center" } },
-            { text: "Credit", align: { x: "right", y: "center" } },
-            { text: "Balance", align: { x: "right", y: "center" } },
-        ]);
-        ledgerRows.forEach((row) => {
-            table.row([
-                { text: fmtDate(row.createdAt, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: row.type.replace(/_/g, " "), align: { x: "center", y: "center" } },
-                { text: row.reference ?? row.note ?? "-", align: { x: "left", y: "center" } },
-                { text: row.debit ? fmtCurrency(row.debit) : "-", align: { x: "right", y: "center" } },
-                { text: row.credit ? fmtCurrency(row.credit) : "-", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.runningBalance), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Total", colSpan: 3, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
-
-        pdfGen.moveDown(1);
-
-        generateSignatureSection(doc, {
-            signatures: [
-                { label: "Customer Signature", name: "_________________", title: customer.name },
-                { label: "Accountant", name: "_________________", title: "Accounts Dept." },
-                { label: "Manager", name: "_________________", title: "General Manager" },
-            ],
-            spacing: 30,
-            lineWidth: 120,
-            labelFont: { family: "Helvetica-Bold", size: 8 },
-            nameFont: { size: 9 },
-        });
-
-        await pdfGen.sendToResponse(res, `customer-statement-${customer.name}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Customer statement PDF error:", error);
         res.status(500).json({ error: "Failed to generate customer statement PDF", message: error instanceof Error ? error.message : "Unknown error" });
@@ -405,24 +381,29 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
         let openingBalance = 0;
         if (from) {
             const aggBefore = await prisma.supplierLedger.aggregate({
-                where: {
-                    supplierId,
-                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
-                },
+                where: { supplierId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
                 _sum: { debit: true, credit: true },
             });
             openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
         }
 
-        // Debit types increase what we owe; credit types decrease it
+        // Debit types increase what we owe; credit types decrease it.
         const debitTypes = ["PURCHASE", "ADJUSTMENT_DR"];
         let runningBalance = openingBalance;
-        const ledgerRows = ledgerEntries.map((entry) => {
+        const ledgerRows: LedgerRow[] = ledgerEntries.map((entry) => {
             const isDebit = debitTypes.includes(entry.type);
             const debit = isDebit ? entry.amount : 0;
             const credit = !isDebit ? entry.amount : 0;
             runningBalance += debit - credit;
-            return { ...entry, debit, credit, runningBalance };
+            return {
+                createdAt: entry.createdAt,
+                type: entry.type,
+                reference: entry.reference,
+                note: entry.note,
+                debit,
+                credit,
+                balance: runningBalance,
+            };
         });
 
         const totalDebit = ledgerRows.reduce((s, r) => s + r.debit, 0);
@@ -432,137 +413,60 @@ export const getSupplierStatementPDF = async (req: Request, res: Response): Prom
         const purchasesCount = ledgerEntries.filter((e) => e.type === "PURCHASE").length;
         const paymentsCount = ledgerEntries.filter((e) => e.type === "PAYMENT").length;
 
-        const reportFonts = fonts();
-        const company = readSettings();
-        const pdfGen = createPDFGenerator({
-            fontRegistrations: reportFonts.registrations,
-            fontFamilyMap: reportFonts.aliasMap,
-            pdfOptions: {
-                size: "A4",
-                margins: { top: 10, bottom: 10, left: 20, right: 20 },
-            },
-            header: {
-                title: "Supplier Account Statement",
-                subtitle: `Supplier: ${supplier.name}`,
-                logo: { path: logoPath, width: 60, height: 60 },
-                companyName: (company.businessName as string) || undefined,
-                address: (company.address as string) || undefined,
-                phone: (company.phone as string) || undefined,
-                showDate: true,
-                titleFont: { family: "Helvetica-Bold" as const, size: 16 },
-                subtitleFont: { size: 10, color: "#666666" },
-                filterInfo: {
-                    "From": from ? fmtDate(from as string) : "All",
-                    "To": to ? fmtDate(to as string) : "Now",
-                },
-            },
-            footer: {
-                leftText: (company.businessName as string) || "POS System",
-                centerText: "Supplier Statement",
-                showPageNumber: true,
-                font: { size: 8, color: "#666666" },
+        const report = createReport({
+            title: "Supplier Statement",
+            subtitle: supplier.name,
+            filename: `supplier-statement-${supplier.name}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            filters: {
+                Supplier: supplier.name,
+                Phone: supplier.phone ?? "N/A",
+                Terms: supplier.paymentTerms ?? "N/A",
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
             },
         });
 
-        const doc = pdfGen.getDocument();
-
-        // Supplier info
-        doc.x = doc.page.margins.left;
-        const infoTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        infoTable.row([
-            { text: "Supplier Name", align: { x: "left", y: "center" } },
-            { text: "Phone", align: { x: "left", y: "center" } },
-            { text: "Payment Terms", align: { x: "left", y: "center" } },
-            { text: "Tax ID", align: { x: "left", y: "center" } },
+        report.stats([
+            { label: "Opening Balance", value: fmtCurrency(openingBalance), tone: "muted" },
+            { label: "Total Purchases", value: fmtCurrency(totalDebit), tone: "primary", note: `${purchasesCount} purchases` },
+            { label: "Total Paid", value: fmtCurrency(totalCredit), tone: "success", note: `${paymentsCount} payments` },
+            {
+                label: "Closing Balance",
+                value: fmtCurrency(closingBalance),
+                tone: balanceTone(closingBalance),
+                note: closingBalance > 0 ? "payable" : undefined,
+            },
+            { label: "Tax ID", value: supplier.taxId ?? "N/A", tone: "muted" },
         ]);
-        infoTable.row([
-            { text: supplier.name, align: { x: "left", y: "center" } },
-            { text: supplier.phone ?? "N/A", align: { x: "left", y: "center" } },
-            { text: supplier.paymentTerms ?? "N/A", align: { x: "left", y: "center" } },
-            { text: supplier.taxId ?? "N/A", align: { x: "left", y: "center" } },
+
+        appendLedger(
+            report,
+            ledgerRows,
+            { openingBalance, totalDebit, totalCredit, closingBalance },
+            {
+                showOpeningRow: Boolean(from),
+                openingDate: from ? fmtDate(from as string, "DD-MM-YYYY") : undefined,
+                debitLabel: "Purchased",
+                creditLabel: "Paid",
+            }
+        );
+
+        report.signatures([
+            { label: "Supplier Signature", name: "_________________", title: supplier.name },
+            { label: "Accountant", name: "_________________", title: "Accounts Dept." },
+            { label: "Manager", name: "_________________", title: "General Manager" },
         ]);
-        infoTable.end();
 
-        pdfGen.moveDown(0.4);
-
-        // Account summary
-        doc.x = doc.page.margins.left;
-        const acctTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        acctTable.row([
-            { text: "Total Purchases", align: { x: "left", y: "center" } },
-            { text: "Total Paid", align: { x: "left", y: "center" } },
-            { text: "Closing Balance", align: { x: "left", y: "center" } },
-            { text: "Transactions", align: { x: "left", y: "center" } },
-        ]);
-        acctTable.row([
-            { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "left", y: "center" } },
-            { text: `${purchasesCount} purchases, ${paymentsCount} payments`, align: { x: "left", y: "center" } },
-        ]);
-        acctTable.end();
-
-        pdfGen.moveDown(0.5);
-
-        // Ledger table — 6 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [80, 90, "*", 80, 80, 85],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Type", align: { x: "center", y: "center" } },
-            { text: "Reference / Note", align: { x: "left", y: "center" } },
-            { text: "Debit", align: { x: "right", y: "center" } },
-            { text: "Credit", align: { x: "right", y: "center" } },
-            { text: "Balance", align: { x: "right", y: "center" } },
-        ]);
-        ledgerRows.forEach((row) => {
-            table.row([
-                { text: fmtDate(row.createdAt, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: row.type.replace(/_/g, " "), align: { x: "center", y: "center" } },
-                { text: row.reference ?? row.note ?? "-", align: { x: "left", y: "center" } },
-                { text: row.debit ? fmtCurrency(row.debit) : "-", align: { x: "right", y: "center" } },
-                { text: row.credit ? fmtCurrency(row.credit) : "-", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.runningBalance), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Total", colSpan: 3, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
-
-        pdfGen.moveDown(1);
-
-        generateSignatureSection(doc, {
-            signatures: [
-                { label: "Supplier Signature", name: "_________________", title: supplier.name },
-                { label: "Accountant", name: "_________________", title: "Accounts Dept." },
-                { label: "Manager", name: "_________________", title: "General Manager" },
-            ],
-            spacing: 30,
-            lineWidth: 120,
-            labelFont: { family: "Helvetica-Bold", size: 8 },
-            nameFont: { size: 9 },
-        });
-
-        await pdfGen.sendToResponse(res, `supplier-statement-${supplier.name}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Supplier statement PDF error:", error);
         res.status(500).json({ error: "Failed to generate supplier statement PDF", message: error instanceof Error ? error.message : "Unknown error" });
     }
 };
+
+/* ------------------------------------------------------------------ */
+/* Ledgers                                                             */
+/* ------------------------------------------------------------------ */
 
 export const getCustomerLedgerReportPDF = async (req: Request, res: Response): Promise<void> => {
     const customerId = Number(req.params.customerId);
@@ -581,153 +485,75 @@ export const getCustomerLedgerReportPDF = async (req: Request, res: Response): P
             orderBy: { createdAt: "asc" },
         });
 
-        // Calculate opening balance: balance of the last entry BEFORE the date range
+        // Opening balance: everything that happened before the range started.
         let openingBalance = 0;
         if (from) {
             const aggBefore = await prisma.customerLedger.aggregate({
-                where: {
-                    customerId,
-                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
-                },
+                where: { customerId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
                 _sum: { debit: true, credit: true },
             });
             openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
         }
 
         const debitTypes = ["SALE", "ADJUSTMENT_DR"];
-
         let totalDebit = 0;
         let totalCredit = 0;
         let runningBalance = openingBalance;
-        const ledgerRows = entries.map((entry) => {
+        const ledgerRows: LedgerRow[] = entries.map((entry) => {
             const debit = entry.debit || (debitTypes.includes(entry.type) ? entry.amount : 0);
             const credit = entry.credit || (!debitTypes.includes(entry.type) ? entry.amount : 0);
             totalDebit += debit;
             totalCredit += credit;
             runningBalance += debit - credit;
-            return { ...entry, debit, credit, balance: runningBalance };
+            return {
+                createdAt: entry.createdAt,
+                type: entry.type,
+                reference: entry.reference,
+                note: entry.note,
+                debit,
+                credit,
+                balance: runningBalance,
+            };
         });
         const closingBalance = runningBalance;
 
-        const reportFonts = fonts();
-        const company = readSettings();
-        const pdfGen = createPDFGenerator({
-            fontRegistrations: reportFonts.registrations,
-            fontFamilyMap: reportFonts.aliasMap,
-            pdfOptions: { size: "A4", margins: { top: 10, bottom: 10, left: 20, right: 20 } },
-            header: {
-                title: "Customer Ledger Report",
-                subtitle: `Customer: ${customer.name}`,
-                logo: { path: logoPath, width: 60, height: 60 },
-                companyName: (company.businessName as string) || undefined,
-                address: (company.address as string) || undefined,
-                phone: (company.phone as string) || undefined,
-                showDate: true,
-                titleFont: { size: 16 },
-                subtitleFont: { size: 10, color: "#666666" },
-                filterInfo: {
-                    "From": from ? fmtDate(from as string) : "All",
-                    "To": to ? fmtDate(to as string) : "Now",
-                },
-            },
-            footer: {
-                leftText: (company.businessName as string) || "POS System",
-                centerText: "Customer Ledger",
-                showPageNumber: true,
-                font: { size: 8, color: "#666666" },
+        const report = createReport({
+            title: "Customer Ledger",
+            subtitle: customer.name,
+            filename: `customer-ledger-${customer.name}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            filters: {
+                Customer: customer.name,
+                Phone: customer.phone ?? "N/A",
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
             },
         });
-        const doc = pdfGen.getDocument();
 
-        // Customer info
-        doc.x = doc.page.margins.left;
-        const infoTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        infoTable.row([
-            { text: "Customer Name", align: { x: "left", y: "center" } },
-            { text: "Phone", align: { x: "left", y: "center" } },
-            { text: "Address", align: { x: "left", y: "center" } },
-            { text: "Credit Limit", align: { x: "left", y: "center" } },
+        report.stats([
+            { label: "Opening Balance", value: fmtCurrency(openingBalance), tone: "muted" },
+            { label: "Total Debit", value: fmtCurrency(totalDebit), tone: "danger" },
+            { label: "Total Credit", value: fmtCurrency(totalCredit), tone: "success" },
+            { label: "Closing Balance", value: fmtCurrency(closingBalance), tone: balanceTone(closingBalance) },
+            {
+                label: "Credit Limit",
+                value: customer.creditLimit != null ? fmtCurrency(customer.creditLimit) : "No Limit",
+                tone: "muted",
+            },
         ]);
-        infoTable.row([
-            { text: customer.name, align: { x: "left", y: "center" } },
-            { text: customer.phone ?? "N/A", align: { x: "left", y: "center" } },
-            { text: customer.address ?? "N/A", align: { x: "left", y: "center" } },
-            { text: customer.creditLimit != null ? fmtCurrency(customer.creditLimit) : "No Limit", align: { x: "left", y: "center" } },
-        ]);
-        infoTable.end();
 
-        pdfGen.moveDown(0.4);
+        appendLedger(
+            report,
+            ledgerRows,
+            { openingBalance, totalDebit, totalCredit, closingBalance },
+            {
+                showOpeningRow: Boolean(from),
+                openingDate: from ? fmtDate(from as string, "DD-MM-YYYY") : undefined,
+                debitLabel: "Debit",
+                creditLabel: "Credit",
+            }
+        );
 
-        // Account summary
-        doc.x = doc.page.margins.left;
-        const acctTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        acctTable.row([
-            { text: "Opening Balance", align: { x: "left", y: "center" } },
-            { text: "Total Debit", align: { x: "left", y: "center" } },
-            { text: "Total Credit", align: { x: "left", y: "center" } },
-            { text: "Closing Balance", align: { x: "left", y: "center" } },
-        ]);
-        acctTable.row([
-            { text: fmtCurrency(openingBalance), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "left", y: "center" } },
-        ]);
-        acctTable.end();
-
-        pdfGen.moveDown(0.5);
-
-        // Ledger table
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [80, 90, "*", 80, 80, 85],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Type", align: { x: "center", y: "center" } },
-            { text: "Reference / Note", align: { x: "left", y: "center" } },
-            { text: "Debit", align: { x: "right", y: "center" } },
-            { text: "Credit", align: { x: "right", y: "center" } },
-            { text: "Balance", align: { x: "right", y: "center" } },
-        ]);
-        // Opening balance row
-        if (from) {
-            table.row([
-                { text: fmtDate(from as string, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: "OPENING BAL", align: { x: "center", y: "center" } },
-                { text: "Opening Balance", align: { x: "left", y: "center" } },
-                { text: "-", align: { x: "right", y: "center" } },
-                { text: "-", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(openingBalance), align: { x: "right", y: "center" } },
-            ]);
-        }
-        ledgerRows.forEach((row) => {
-            table.row([
-                { text: fmtDate(row.createdAt, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: row.type.replace(/_/g, " "), align: { x: "center", y: "center" } },
-                { text: row.reference ?? row.note ?? "-", align: { x: "left", y: "center" } },
-                { text: row.debit ? fmtCurrency(row.debit) : "-", align: { x: "right", y: "center" } },
-                { text: row.credit ? fmtCurrency(row.credit) : "-", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.balance), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Total", colSpan: 3, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
-
-        await pdfGen.sendToResponse(res, `customer-ledger-${customer.name}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Customer ledger report PDF error:", error);
         res.status(500).json({ error: "Failed to generate customer ledger report PDF", message: error instanceof Error ? error.message : "Unknown error" });
@@ -751,153 +577,72 @@ export const getSupplierLedgerReportPDF = async (req: Request, res: Response): P
             orderBy: { createdAt: "asc" },
         });
 
-        // Calculate opening balance: balance of the last entry BEFORE the date range
+        // Opening balance: everything that happened before the range started.
         let openingBalance = 0;
         if (from) {
             const aggBefore = await prisma.supplierLedger.aggregate({
-                where: {
-                    supplierId,
-                    createdAt: { lt: new Date(`${from}T00:00:00.000`) },
-                },
+                where: { supplierId, createdAt: { lt: new Date(`${from}T00:00:00.000`) } },
                 _sum: { debit: true, credit: true },
             });
             openingBalance = (aggBefore._sum.debit ?? 0) - (aggBefore._sum.credit ?? 0);
         }
 
         const debitTypes = ["PURCHASE", "ADJUSTMENT_DR"];
-
         let totalDebit = 0;
         let totalCredit = 0;
         let runningBalance = openingBalance;
-        const ledgerRows = entries.map((entry) => {
+        const ledgerRows: LedgerRow[] = entries.map((entry) => {
             const debit = entry.debit || (debitTypes.includes(entry.type) ? entry.amount : 0);
             const credit = entry.credit || (!debitTypes.includes(entry.type) ? entry.amount : 0);
             totalDebit += debit;
             totalCredit += credit;
             runningBalance += debit - credit;
-            return { ...entry, debit, credit, balance: runningBalance };
+            return {
+                createdAt: entry.createdAt,
+                type: entry.type,
+                reference: entry.reference,
+                note: entry.note,
+                debit,
+                credit,
+                balance: runningBalance,
+            };
         });
         const closingBalance = runningBalance;
 
-        const reportFonts = fonts();
-        const company = readSettings();
-        const pdfGen = createPDFGenerator({
-            fontRegistrations: reportFonts.registrations,
-            fontFamilyMap: reportFonts.aliasMap,
-            pdfOptions: { size: "A4", margins: { top: 10, bottom: 10, left: 20, right: 20 } },
-            header: {
-                title: "Supplier Ledger Report",
-                subtitle: `Supplier: ${supplier.name}`,
-                logo: { path: logoPath, width: 60, height: 60 },
-                companyName: (company.businessName as string) || undefined,
-                address: (company.address as string) || undefined,
-                phone: (company.phone as string) || undefined,
-                showDate: true,
-                titleFont: { family: "Helvetica-Bold" as const, size: 16 },
-                subtitleFont: { size: 10, color: "#666666" },
-                filterInfo: {
-                    "From": from ? fmtDate(from as string) : "All",
-                    "To": to ? fmtDate(to as string) : "Now",
-                },
-            },
-            footer: {
-                leftText: (company.businessName as string) || "POS System",
-                centerText: "Supplier Ledger",
-                showPageNumber: true,
-                font: { size: 8, color: "#666666" },
+        const report = createReport({
+            title: "Supplier Ledger",
+            subtitle: supplier.name,
+            filename: `supplier-ledger-${supplier.name}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            filters: {
+                Supplier: supplier.name,
+                Phone: supplier.phone ?? "N/A",
+                Terms: supplier.paymentTerms ?? "N/A",
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
             },
         });
-        const doc = pdfGen.getDocument();
 
-        // Supplier info
-        doc.x = doc.page.margins.left;
-        const infoTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        infoTable.row([
-            { text: "Supplier Name", align: { x: "left", y: "center" } },
-            { text: "Phone", align: { x: "left", y: "center" } },
-            { text: "Payment Terms", align: { x: "left", y: "center" } },
-            { text: "Tax ID", align: { x: "left", y: "center" } },
+        report.stats([
+            { label: "Opening Balance", value: fmtCurrency(openingBalance), tone: "muted" },
+            { label: "Total Debit", value: fmtCurrency(totalDebit), tone: "danger" },
+            { label: "Total Credit", value: fmtCurrency(totalCredit), tone: "success" },
+            { label: "Closing Balance", value: fmtCurrency(closingBalance), tone: balanceTone(closingBalance) },
+            { label: "Tax ID", value: supplier.taxId ?? "N/A", tone: "muted" },
         ]);
-        infoTable.row([
-            { text: supplier.name, align: { x: "left", y: "center" } },
-            { text: supplier.phone ?? "N/A", align: { x: "left", y: "center" } },
-            { text: supplier.paymentTerms ?? "N/A", align: { x: "left", y: "center" } },
-            { text: supplier.taxId ?? "N/A", align: { x: "left", y: "center" } },
-        ]);
-        infoTable.end();
 
-        pdfGen.moveDown(0.4);
+        appendLedger(
+            report,
+            ledgerRows,
+            { openingBalance, totalDebit, totalCredit, closingBalance },
+            {
+                showOpeningRow: Boolean(from) && openingBalance !== 0,
+                openingDate: from ? fmtDate(from as string, "DD-MM-YYYY") : undefined,
+                debitLabel: "Debit",
+                creditLabel: "Credit",
+            }
+        );
 
-        // Account summary
-        doc.x = doc.page.margins.left;
-        const acctTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        acctTable.row([
-            { text: "Opening Balance", align: { x: "left", y: "center" } },
-            { text: "Total Debit", align: { x: "left", y: "center" } },
-            { text: "Total Credit", align: { x: "left", y: "center" } },
-            { text: "Closing Balance", align: { x: "left", y: "center" } },
-        ]);
-        acctTable.row([
-            { text: fmtCurrency(openingBalance), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "left", y: "center" } },
-        ]);
-        acctTable.end();
-
-        pdfGen.moveDown(0.5);
-
-        // Ledger table
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [80, 90, "*", 80, 80, 85],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Type", align: { x: "center", y: "center" } },
-            { text: "Reference / Note", align: { x: "left", y: "center" } },
-            { text: "Debit", align: { x: "right", y: "center" } },
-            { text: "Credit", align: { x: "right", y: "center" } },
-            { text: "Balance", align: { x: "right", y: "center" } },
-        ]);
-        // Opening balance row
-        if (from && openingBalance !== 0) {
-            table.row([
-                { text: fmtDate(from as string, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: "OPENING BAL", align: { x: "center", y: "center" } },
-                { text: "Opening Balance", align: { x: "left", y: "center" } },
-                { text: "-", align: { x: "right", y: "center" } },
-                { text: "-", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(openingBalance), align: { x: "right", y: "center" } },
-            ]);
-        }
-        ledgerRows.forEach((row) => {
-            table.row([
-                { text: fmtDate(row.createdAt, "DD-MM-YYYY hh:mm:A"), align: { x: "center", y: "center" } },
-                { text: row.type.replace(/_/g, " "), align: { x: "center", y: "center" } },
-                { text: row.reference ?? row.note ?? "-", align: { x: "left", y: "center" } },
-                { text: row.debit ? fmtCurrency(row.debit) : "-", align: { x: "right", y: "center" } },
-                { text: row.credit ? fmtCurrency(row.credit) : "-", align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.balance), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Total", colSpan: 3, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(closingBalance), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
-
-        await pdfGen.sendToResponse(res, `supplier-ledger-${supplier.name}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Supplier ledger report PDF error:", error);
         res.status(500).json({ error: "Failed to generate supplier ledger report PDF", message: error instanceof Error ? error.message : "Unknown error" });

@@ -1,14 +1,13 @@
 import { Request, Response } from "express";
 import dayjs from "dayjs";
 import { prisma } from "../../prisma/prisma";
-import { generateSignatureSection } from "../../utils/pdf/pdfkit-components";
 import {
     fmtDate,
     fmtCurrency,
-    pdfConfig,
-    generateQRBuffer,
-    createPDFGenerator
+    createReport,
+    sendReport,
 } from "./helpers";
+import type { TableCell } from "../../utils/pdf/report-spec";
 
 // Helper to format real transaction time (using createdAt when date has 00:00:00 UTC / date-only)
 function getDisplayTime(item: { createdAt?: Date | string; date?: Date | string }): string {
@@ -224,68 +223,67 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
 
         const salesCount = regularSales.length;
         const returnsCount = saleReturns.length;
-        const dailyQr = await generateQRBuffer(`Daily Report | ${fmtDate(dateStr)} | Sales: ${salesCount} | Returns: ${returnsCount} | Purchases: ${regularPurchases.length}`);
-        const pdfGen = createPDFGenerator(pdfConfig(
-            "Daily Report",
-            `Summary for ${fmtDate(dateStr)}`,
+        const report = createReport({
+            title: "Daily Report",
+            subtitle: `Business summary for ${fmtDate(dateStr)}`,
+            filename: `daily-report-${dateStr}.pdf`,
+            filters: {
+                Date: fmtDate(dateStr),
+                Sales: salesCount,
+                Returns: returnsCount,
+                Purchases: regularPurchases.length,
+                Expenses: expenses.length,
+            },
+        });
+
+        const outgoings = totalExpenses + totalSalaries + dailyRecurringExpenses;
+
+        report.stats([
+            { label: "Net Revenue", value: fmtCurrency(netRevenue), tone: "primary", note: `${salesCount} invoices` },
+            { label: "Gross Profit", value: fmtCurrency(grossProfit), tone: grossProfit < 0 ? "danger" : "success" },
+            { label: "Outgoings", value: fmtCurrency(outgoings), tone: "danger", note: "expenses + salaries" },
+            { label: "Net Profit", value: fmtCurrency(netProfit), tone: netProfit < 0 ? "danger" : "success" },
+            { label: "Purchases", value: fmtCurrency(totalPurchases), tone: "muted", note: `${regularPurchases.length} orders` },
+            { label: "Received", value: fmtCurrency(totalCustPayments), tone: "success", note: "customer payments" },
+            { label: "Paid Out", value: fmtCurrency(totalSuppPayments), tone: "warning", note: "supplier payments" },
             {
-                "Date": fmtDate(dateStr),
-                "Sales": salesCount,
-                "Returns": returnsCount,
-                "Purchases": regularPurchases.length,
-                "Expenses": expenses.length,
+                label: "Sales Returns",
+                value: fmtCurrency(totalSaleReturns),
+                tone: totalSaleReturns > 0 ? "warning" : "muted",
+                note: `${returnsCount} returns`,
             },
-            "portrait",
-            undefined,
-            dailyQr
-        ));
-        const doc = pdfGen.getDocument();
+        ]);
 
-        const sectionHeader = (title: string, color = "#1e293b") => {
-            doc.x = doc.page.margins.left;
-            doc.fontSize(11).fillColor(color).text(title);
-            doc.moveDown(0.3);
-        };
-
-        // ── P&L Summary Table ──
-        sectionHeader("Daily P&L Summary", "#1e40af");
-        doc.x = doc.page.margins.left;
-        doc.fontSize(8);
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*"],
-            rowStyles: (row: number) => {
-                if (row === 0) return { backgroundColor: "#dbeafe", fontSize: 10, fontStyle: "bold" };
-                // Highlight Gross Profit (row index 7) and Net Profit (row index 15)
-                if (row === 7 || row === 15) return { backgroundColor: "#e2e8f0", fontStyle: "bold", fontSize: 9 };
-                if (row % 2 === 0) return { backgroundColor: "#f8fafc" };
-                return {};
-            },
+        report.section("Profit & Loss", `Line-by-line for ${fmtDate(dateStr)}`);
+        report.table({
+            columns: [
+                { label: "Metric", width: "*" },
+                { label: "Amount (Rs)", width: 150, align: "right" },
+            ],
+            rows: [
+                [`Sales Revenue (${regularSales.length} invoices)`, fmtCurrency(totalRevenue)],
+                [`Sales Returns (${saleReturns.length} returns)`, fmtCurrency(-totalSaleReturns)],
+                ["    Discount Given", fmtCurrency(totalDiscount)],
+                ["    Tax Collected", fmtCurrency(totalTax)],
+                ["    Cost of Goods Sold", fmtCurrency(totalCOGS)],
+                ["    COGS on Returned Items", fmtCurrency(-totalSaleReturnsCOGS)],
+                [
+                    { text: "Gross Profit", bold: true },
+                    { text: fmtCurrency(grossProfit), align: "right", bold: true, tone: grossProfit < 0 ? "danger" : "success" },
+                ],
+                [`Purchases (${regularPurchases.length} orders)`, fmtCurrency(totalPurchases)],
+                [`Purchase Returns (${purchaseReturns.length} returns)`, fmtCurrency(-totalPurchaseReturns)],
+                [`Expenses (${expenses.length})`, fmtCurrency(totalExpenses)],
+                ["Recurring Expenses (daily share)", fmtCurrency(dailyRecurringExpenses)],
+                [`Salaries Paid (${salarySlips.length})`, fmtCurrency(totalSalaries)],
+                ["Customer Payments Received", fmtCurrency(totalCustPayments)],
+                ["Supplier Payments Made", fmtCurrency(totalSuppPayments)],
+            ] as TableCell[][],
+            totalRow: [
+                { text: "Net Profit" },
+                { text: fmtCurrency(netProfit), align: "right", tone: netProfit < 0 ? "danger" : "success" },
+            ],
         });
-        [
-            ["Metric", "Amount (Rs)"],
-            [`Sales Revenue (${regularSales.length} invoices)`, fmtCurrency(totalRevenue)],
-            [`Sales Returns (${saleReturns.length} returns)`, fmtCurrency(-totalSaleReturns)],
-            [`  Discount Given`, fmtCurrency(totalDiscount)],
-            [`  Tax Collected`, fmtCurrency(totalTax)],
-            [`  COGS`, fmtCurrency(totalCOGS)],
-            [`  COGS (Returned Items)`, fmtCurrency(-totalSaleReturnsCOGS)],
-            [`  Gross Profit`, fmtCurrency(grossProfit)],
-            [`Purchases (${regularPurchases.length} orders)`, fmtCurrency(totalPurchases)],
-            [`Purchase Returns (${purchaseReturns.length} returns)`, fmtCurrency(-totalPurchaseReturns)],
-            [`Expenses (${expenses.length})`, fmtCurrency(totalExpenses)],
-            [`Recurring Expenses (Daily)`, fmtCurrency(dailyRecurringExpenses)],
-            [`Salaries Paid (${salarySlips.length})`, fmtCurrency(totalSalaries)],
-            [`Customer Payments Received`, fmtCurrency(totalCustPayments)],
-            [`Supplier Payments Made`, fmtCurrency(totalSuppPayments)],
-            [`Net Profit`, fmtCurrency(netProfit)],
-        ].forEach((row, i) => {
-            summaryTable.row([
-                { text: row[0], align: { x: "left", y: "center" } },
-                { text: row[1], align: { x: "right", y: "center" } },
-            ]);
-        });
-        summaryTable.end();
-        pdfGen.moveDown(0.8);
 
         // ── Account balances & cash flow ──
         const accountIds = accountsList.map(a => a.id);
@@ -392,321 +390,272 @@ export const getDailyReportPDF = async (req: Request, res: Response): Promise<vo
             }
         }
 
-        sectionHeader("Account Balances & Cash Flow", "#1e3a8a");
-        doc.x = doc.page.margins.left;
-        doc.fontSize(8);
-        const accountTable = doc.table({
-            columnStyles: [60, "*", 90, 90, 90, 90],
-            rowStyles: (row: number) => {
-                if (row === 0) return { backgroundColor: "#e2e8f0", fontSize: 9, fontStyle: "bold" };
-                if (row % 2 === 0) return { backgroundColor: "#f8fafc" };
-                return {};
-            },
-        });
-        accountTable.row([
-            "Code", "Account Name", "Opening (Rs)", "Cash In (Rs)", "Cash Out (Rs)", "Closing (Rs)"
-        ].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-
         let grandOpening = 0;
         let grandCashIn = 0;
         let grandCashOut = 0;
         let grandClosing = 0;
-
-        accountsList.forEach(acc => {
+        for (const acc of accountsList) {
             const summary = accountSummaryMap.get(acc.id)!;
-            const closing = summary.opening + summary.cashIn - summary.cashOut;
-
             grandOpening += summary.opening;
             grandCashIn += summary.cashIn;
             grandCashOut += summary.cashOut;
-            grandClosing += closing;
-
-            accountTable.row([
-                { text: summary.code, align: { x: "center", y: "center" } },
-                { text: summary.name, align: { x: "left", y: "center" } },
-                { text: fmtCurrency(summary.opening), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(summary.cashIn), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(summary.cashOut), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(closing), align: { x: "right", y: "center" } },
-            ]);
-        });
-
-        accountTable.row([
-            { text: "Total", colSpan: 2, align: { x: "right", y: "center" } },
-            { text: fmtCurrency(grandOpening), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(grandCashIn), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(grandCashOut), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(grandClosing), align: { x: "right", y: "center" } },
-        ]);
-        accountTable.end();
-        pdfGen.moveDown(0.8);
-
-        // ── Purchases table ──
-        if (regularPurchases.length > 0) {
-            sectionHeader(`Purchases (${regularPurchases.length})`, "#1e3a8a");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, "*", 80, 80],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#dbeafe", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "Supplier", "Total", "Paid"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            regularPurchases.forEach((p, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: getDisplayTime(p), align: { x: "center", y: "center" } },
-                    { text: p.supplier?.name ?? "N/A", align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(p.totalAmount), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(p.paidAmount), align: { x: "right", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 3, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPurchases), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPurchasesPaid), align: { x: "right", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
+            grandClosing += summary.opening + summary.cashIn - summary.cashOut;
         }
 
-        // ── Purchase Returns table ──
-        if (purchaseReturns.length > 0) {
-            sectionHeader(`Purchase Returns (${purchaseReturns.length})`, "#c2410c");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, "*", 80, 80, 80],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ffedd5", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "Supplier", "Total Return", "Paid Back", "Orig. Invoice #"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            purchaseReturns.forEach((p, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: getDisplayTime(p), align: { x: "center", y: "center" } },
-                    { text: p.supplier?.name ?? "N/A", align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(Math.abs(p.totalAmount)), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(Math.abs(p.paidAmount)), align: { x: "right", y: "center" } },
-                    { text: p.parentPurchaseId ? `#${p.parentPurchaseId}` : "N/A", align: { x: "center", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 3, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPurchaseReturns), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(purchaseReturns.reduce((s, x) => s + Math.abs(x.paidAmount), 0)), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Expenses table ──
-        if (expenses.length > 0) {
-            sectionHeader(`Expenses (${expenses.length})`, "#7c2d12");
-            doc.fontSize(8);
-            doc.x = doc.page.margins.left;
-            const t = doc.table({
-                columnStyles: [30, 60, "*", 100, 90, 80],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#fee2e2", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "Description", "Category", "Account", "Amount"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            expenses.forEach((ex, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: getDisplayTime(ex), align: { x: "center", y: "center" } },
-                    { text: ex.description, align: { x: "left", y: "center" } },
-                    { text: ex.category, align: { x: "left", y: "center" } },
-                    { text: ex.account.name, align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(ex.amount), align: { x: "right", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 5, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalExpenses), align: { x: "right", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Salaries table ──
-        if (salarySlips.length > 0) {
-            sectionHeader(`Salaries Paid (${salarySlips.length})`, "#5b21b6");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, "*", 70, 90, 70, 80],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ede9fe", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Employee", "Month/Year", "Account", "Advances", "Net Paid"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            salarySlips.forEach((sl, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: sl.employee.name, align: { x: "left", y: "center" } },
-                    { text: `${sl.month}/${sl.year}`, align: { x: "center", y: "center" } },
-                    { text: sl.account?.name ?? "N/A", align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(sl.totalAdvances), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(sl.netPayable), align: { x: "right", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(salarySlips.reduce((s, x) => s + x.totalAdvances, 0)), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalSalaries), align: { x: "right", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Customer payments ──
-        if (customerPayments.length > 0) {
-            sectionHeader(`Customer Payments Received (${customerPayments.length})`, "#0f766e");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, "*", 90, 80, "*"],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ccfbf1", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "Customer", "Account", "Amount", "Note"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            customerPayments.forEach((cp, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: getDisplayTime(cp), align: { x: "center", y: "center" } },
-                    { text: cp.customer.name, align: { x: "left", y: "center" } },
-                    { text: cp.account.name, align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(cp.amount), align: { x: "right", y: "center" } },
-                    { text: cp.note ?? "", align: { x: "left", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalCustPayments), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Supplier payments ──
-        if (supplierPayments.length > 0) {
-            sectionHeader(`Supplier Payments Made (${supplierPayments.length})`, "#9a3412");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, "*", 90, 80, "*"],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ffedd5", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "Supplier", "Account", "Amount", "Note"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            supplierPayments.forEach((sp, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: getDisplayTime(sp), align: { x: "center", y: "center" } },
-                    { text: sp.supplier.name, align: { x: "left", y: "center" } },
-                    { text: sp.account.name, align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(sp.amount), align: { x: "right", y: "center" } },
-                    { text: sp.note ?? "", align: { x: "left", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalSuppPayments), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Employee Advances table ──
-        if (employeeAdvances.length > 0) {
-            sectionHeader(`Employee Advances Given (${employeeAdvances.length})`, "#65a30d");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, "*", 90, 80, "*"],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f7fee7", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "Employee", "Account", "Amount", "Reason"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            employeeAdvances.forEach((ea, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: getDisplayTime(ea), align: { x: "center", y: "center" } },
-                    { text: ea.employee.name, align: { x: "left", y: "center" } },
-                    { text: ea.account.name, align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(ea.amount), align: { x: "right", y: "center" } },
-                    { text: ea.reason ?? "", align: { x: "left", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(employeeAdvances.reduce((s, x) => s + x.amount, 0)), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Account Transfers table ──
-        if (accountTransfers.length > 0) {
-            sectionHeader(`Account Transfers (${accountTransfers.length})`, "#475569");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, "*", "*", 80, "*"],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f1f5f9", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Time", "From Account", "To Account", "Amount", "Note"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            accountTransfers.forEach((tr, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(tr.createdAt, "hh:mm A"), align: { x: "center", y: "center" } },
-                    { text: tr.fromAccount.name, align: { x: "left", y: "center" } },
-                    { text: tr.toAccount.name, align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(tr.amount), align: { x: "right", y: "center" } },
-                    { text: tr.note ?? "", align: { x: "left", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 4, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(accountTransfers.reduce((s, x) => s + x.amount, 0)), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        // ── Recurring Expenses note ──
-        if (recurringExpenses.length > 0) {
-            sectionHeader(`Active Recurring Expenses (${recurringExpenses.length})`, "#92400e");
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: ["*", "*", "*", 80],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#fef3c7", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["Name", "Category", "Frequency", "Amount (Rs)"].map(h => ({ text: h, align: { x: "left", y: "center" } })));
-            recurringExpenses.forEach(re => {
-                t.row([
-                    { text: re.name, align: { x: "left", y: "center" } },
-                    { text: re.category, align: { x: "left", y: "center" } },
-                    { text: re.frequency, align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(re.amount), align: { x: "right", y: "center" } },
-                ]);
-            });
-            t.end();
-            pdfGen.moveDown(0.8);
-        }
-
-        generateSignatureSection(doc, {
-            signatures: [
-                { label: "Prepared By", name: "_________________", title: "Cashier" },
-                { label: "Reviewed By", name: "_________________", title: "Manager" },
-                { label: "Approved By", name: "_________________", title: "Owner" },
+        report.section("Account Balances & Cash Flow", `${accountsList.length} account(s)`);
+        report.table({
+            columns: [
+                { label: "Code", width: 58, align: "center" },
+                { label: "Account Name", width: "*" },
+                { label: "Opening", width: 88, align: "right" },
+                { label: "Cash In", width: 88, align: "right" },
+                { label: "Cash Out", width: 88, align: "right" },
+                { label: "Closing", width: 88, align: "right" },
             ],
-            spacing: 30,
-            lineWidth: 120,
-            labelFont: { family: "Helvetica-Bold", size: 8 },
-            nameFont: { size: 9 },
+            rows: accountsList.map((acc) => {
+                const summary = accountSummaryMap.get(acc.id)!;
+                const closing = summary.opening + summary.cashIn - summary.cashOut;
+                return [
+                    summary.code,
+                    summary.name,
+                    fmtCurrency(summary.opening),
+                    { text: fmtCurrency(summary.cashIn), align: "right", tone: summary.cashIn ? "success" : undefined },
+                    { text: fmtCurrency(summary.cashOut), align: "right", tone: summary.cashOut ? "danger" : undefined },
+                    { text: fmtCurrency(closing), align: "right", bold: true },
+                ];
+            }) as TableCell[][],
+            totalRow: [
+                { text: "Total", colSpan: 2 },
+                fmtCurrency(grandOpening),
+                fmtCurrency(grandCashIn),
+                fmtCurrency(grandCashOut),
+                fmtCurrency(grandClosing),
+            ],
         });
 
-        await pdfGen.sendToResponse(res, `daily-report-${dateStr}.pdf`);
+        if (regularPurchases.length > 0) {
+            report.section("Purchases", `${regularPurchases.length} order(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 68, align: "center" },
+                    { label: "Supplier", width: "*" },
+                    { label: "Total", width: 92, align: "right" },
+                    { label: "Paid", width: 92, align: "right" },
+                ],
+                rows: regularPurchases.map((p, i) => [
+                    String(i + 1),
+                    getDisplayTime(p),
+                    p.supplier?.name ?? "N/A",
+                    fmtCurrency(p.totalAmount),
+                    fmtCurrency(p.paidAmount),
+                ]),
+                totalRow: [
+                    { text: "Total", colSpan: 3 },
+                    fmtCurrency(totalPurchases),
+                    fmtCurrency(totalPurchasesPaid),
+                ],
+            });
+        }
+
+        if (purchaseReturns.length > 0) {
+            report.section("Purchase Returns", `${purchaseReturns.length} return(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 62, align: "center" },
+                    { label: "Supplier", width: "*" },
+                    { label: "Total Return", width: 84, align: "right" },
+                    { label: "Paid Back", width: 78, align: "right" },
+                    { label: "Orig. Invoice", width: 80, align: "center" },
+                ],
+                rows: purchaseReturns.map((p, i) => [
+                    String(i + 1),
+                    getDisplayTime(p),
+                    p.supplier?.name ?? "N/A",
+                    fmtCurrency(Math.abs(p.totalAmount)),
+                    fmtCurrency(Math.abs(p.paidAmount)),
+                    p.parentPurchaseId ? `#${p.parentPurchaseId}` : "N/A",
+                ]),
+                totalRow: [
+                    { text: "Total", colSpan: 3 },
+                    fmtCurrency(totalPurchaseReturns),
+                    fmtCurrency(purchaseReturns.reduce((s, x) => s + Math.abs(x.paidAmount), 0)),
+                    "",
+                ],
+            });
+        }
+
+        if (expenses.length > 0) {
+            report.section("Expenses", `${expenses.length} entry(ies)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 62, align: "center" },
+                    { label: "Description", width: "*" },
+                    { label: "Category", width: 96 },
+                    { label: "Account", width: 88 },
+                    { label: "Amount", width: 82, align: "right" },
+                ],
+                rows: expenses.map((ex, i) => [
+                    String(i + 1),
+                    getDisplayTime(ex),
+                    ex.description,
+                    ex.category,
+                    ex.account.name,
+                    fmtCurrency(ex.amount),
+                ]),
+                totalRow: [{ text: "Total", colSpan: 5 }, fmtCurrency(totalExpenses)],
+            });
+        }
+
+        if (salarySlips.length > 0) {
+            report.section("Salaries Paid", `${salarySlips.length} slip(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Employee", width: "*" },
+                    { label: "Month/Year", width: 76, align: "center" },
+                    { label: "Account", width: 92 },
+                    { label: "Advances", width: 78, align: "right" },
+                    { label: "Net Paid", width: 82, align: "right" },
+                ],
+                rows: salarySlips.map((sl, i) => [
+                    String(i + 1),
+                    sl.employee.name,
+                    `${sl.month}/${sl.year}`,
+                    sl.account?.name ?? "N/A",
+                    fmtCurrency(sl.totalAdvances),
+                    fmtCurrency(sl.netPayable),
+                ]),
+                totalRow: [
+                    { text: "Total", colSpan: 4 },
+                    fmtCurrency(salarySlips.reduce((s, x) => s + x.totalAdvances, 0)),
+                    fmtCurrency(totalSalaries),
+                ],
+            });
+        }
+
+        if (customerPayments.length > 0) {
+            report.section("Customer Payments Received", `${customerPayments.length} payment(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 62, align: "center" },
+                    { label: "Customer", width: "*" },
+                    { label: "Account", width: 92 },
+                    { label: "Amount", width: 82, align: "right" },
+                    { label: "Note", width: 120 },
+                ],
+                rows: customerPayments.map((cp, i) => [
+                    String(i + 1),
+                    getDisplayTime(cp),
+                    cp.customer.name,
+                    cp.account.name,
+                    fmtCurrency(cp.amount),
+                    cp.note ?? "",
+                ]),
+                totalRow: [{ text: "Total", colSpan: 4 }, fmtCurrency(totalCustPayments), ""],
+            });
+        }
+
+        if (supplierPayments.length > 0) {
+            report.section("Supplier Payments Made", `${supplierPayments.length} payment(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 62, align: "center" },
+                    { label: "Supplier", width: "*" },
+                    { label: "Account", width: 92 },
+                    { label: "Amount", width: 82, align: "right" },
+                    { label: "Note", width: 120 },
+                ],
+                rows: supplierPayments.map((sp, i) => [
+                    String(i + 1),
+                    getDisplayTime(sp),
+                    sp.supplier.name,
+                    sp.account.name,
+                    fmtCurrency(sp.amount),
+                    sp.note ?? "",
+                ]),
+                totalRow: [{ text: "Total", colSpan: 4 }, fmtCurrency(totalSuppPayments), ""],
+            });
+        }
+
+        if (employeeAdvances.length > 0) {
+            report.section("Employee Advances Given", `${employeeAdvances.length} advance(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 62, align: "center" },
+                    { label: "Employee", width: "*" },
+                    { label: "Account", width: 92 },
+                    { label: "Amount", width: 82, align: "right" },
+                    { label: "Reason", width: 120 },
+                ],
+                rows: employeeAdvances.map((ea, i) => [
+                    String(i + 1),
+                    getDisplayTime(ea),
+                    ea.employee.name,
+                    ea.account.name,
+                    fmtCurrency(ea.amount),
+                    ea.reason ?? "",
+                ]),
+                totalRow: [
+                    { text: "Total", colSpan: 4 },
+                    fmtCurrency(employeeAdvances.reduce((s, x) => s + x.amount, 0)),
+                    "",
+                ],
+            });
+        }
+
+        if (accountTransfers.length > 0) {
+            report.section("Account Transfers", `${accountTransfers.length} transfer(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Time", width: 62, align: "center" },
+                    { label: "From Account", width: "*" },
+                    { label: "To Account", width: "*" },
+                    { label: "Amount", width: 82, align: "right" },
+                    { label: "Note", width: 110 },
+                ],
+                rows: accountTransfers.map((tr, i) => [
+                    String(i + 1),
+                    fmtDate(tr.createdAt, "hh:mm A"),
+                    tr.fromAccount.name,
+                    tr.toAccount.name,
+                    fmtCurrency(tr.amount),
+                    tr.note ?? "",
+                ]),
+                totalRow: [
+                    { text: "Total", colSpan: 4 },
+                    fmtCurrency(accountTransfers.reduce((s, x) => s + x.amount, 0)),
+                    "",
+                ],
+            });
+        }
+
+        if (recurringExpenses.length > 0) {
+            report.section("Active Recurring Expenses", `${recurringExpenses.length} configured`);
+            report.table({
+                columns: [
+                    { label: "Name", width: "*" },
+                    { label: "Category", width: "*" },
+                    { label: "Frequency", width: 100 },
+                    { label: "Amount (Rs)", width: 92, align: "right" },
+                ],
+                rows: recurringExpenses.map((re) => [re.name, re.category, re.frequency, fmtCurrency(re.amount)]),
+            });
+        }
+
+        report.signatures([
+            { label: "Prepared By", name: "_________________", title: "Cashier" },
+            { label: "Reviewed By", name: "_________________", title: "Manager" },
+            { label: "Approved By", name: "_________________", title: "Owner" },
+        ]);
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Daily report PDF error:", error);
         res.status(500).json({ error: "Failed to generate daily report PDF", message: error instanceof Error ? error.message : "Unknown error" });

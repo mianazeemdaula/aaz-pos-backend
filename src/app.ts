@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import apiRouter from "./routes";
+import { isThreadedRenderingEnabled, getPoolSize } from "./utils/pdf";
 
 const app = express();
 app.use(cors());
@@ -14,7 +15,12 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use("/public", express.static(path.join(process.cwd(), "public")));
 
 app.get("/", (_req, res) => res.json({ message: "POS API" }));
-app.get("/api/health", (_req, res) => res.json({ status: "OK" }));
+app.get("/api/health", (_req, res) =>
+    res.json({
+        status: "OK",
+        pdf: { threaded: isThreadedRenderingEnabled(), workers: getPoolSize() },
+    })
+);
 app.use("/api", apiRouter);
 
 export default app;

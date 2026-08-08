@@ -4,12 +4,20 @@ import { prisma } from "../../prisma/prisma";
 import {
     fmtDate,
     fmtCurrency,
-    pdfConfig,
-    fonts,
-    generateQRBuffer,
-    createPDFGenerator,
-    readSettings
+    createReport,
+    reportFilename,
+    sendReport,
 } from "./helpers";
+import type { StatItem, TableCell } from "../../utils/pdf/report-spec";
+
+/** Profit reads green when the business made money and red when it did not. */
+function profitTone(value: number) {
+    return value < 0 ? ("danger" as const) : ("success" as const);
+}
+
+function dueTone(value: number) {
+    return value > 0 ? ("danger" as const) : ("muted" as const);
+}
 
 export const getSalesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to, userId } = req.query;
@@ -41,142 +49,122 @@ export const getSalesReportPDF = async (req: Request, res: Response): Promise<vo
         const totalPaid = sales.reduce((s, sale) => s + sale.paidAmount, 0);
         const totalDue = sales.reduce((s, sale) => s + (sale.totalAmount - sale.paidAmount), 0);
 
-        const rows = sales.map((sale, i) => ({
-            sno: i + 1,
-            date: sale.createdAt,
-            customer: sale.customer?.name ?? "Walk-in",
-            cashier: sale.user?.name ?? "N/A",
-            itemsCount: sale.items.length,
-            discount: sale.discount + sale.items.reduce((is, item) => is + (item.discount || 0) * item.quantity, 0),
-            tax: sale.taxAmount,
-            total: sale.totalAmount,
-            paid: sale.paidAmount,
-            due: sale.totalAmount - sale.paidAmount,
-        }));
-
         let cashierName = "All";
         if (userId) {
             const u = await prisma.user.findUnique({ where: { id: parseInt(userId as string) }, select: { name: true } });
             if (u) cashierName = u.name;
         }
 
-        const salesCount = sales.filter(s => s.totalAmount >= 0).length;
-        const salesQr = await generateQRBuffer(`Sales Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Txns: ${salesCount}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Sales Report", "Sales Transaction Summary", {
-                "From": from ? fmtDate(from as string) : "All Time",
-                "To": to ? fmtDate(to as string) : "Now",
-                "Cashier": cashierName,
-                "Transactions": salesCount,
-            }, "landscape", "A4", salesQr)
-        );
-        const doc = pdfGen.getDocument();
+        const salesCount = sales.filter((s) => s.totalAmount >= 0).length;
 
-        // Summary section
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Sales Report",
+            subtitle: "Sales transaction summary",
+            filename: reportFilename("sales-report"),
+            orientation: "landscape",
+            filters: {
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Cashier: cashierName,
+                Transactions: salesCount,
+            },
         });
-        summaryTable.row([
-            { text: "Total Revenue", align: { x: "left", y: "center" } },
-            { text: "Total Discount", align: { x: "left", y: "center" } },
-            { text: "Total Tax", align: { x: "left", y: "center" } },
-            { text: "Cost of Goods", align: { x: "left", y: "center" } },
-            { text: "Gross Profit", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: fmtCurrency(totalRevenue), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalCOGS), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(grossProfit), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.3);
+        const margin = totalRevenue !== 0 ? (grossProfit / totalRevenue) * 100 : 0;
 
-        // Calculate payment method breakdown
+        report.stats([
+            { label: "Total Revenue", value: fmtCurrency(totalRevenue), tone: "primary", note: `${salesCount} transactions` },
+            { label: "Amount Collected", value: fmtCurrency(totalPaid), tone: "success" },
+            { label: "Outstanding Due", value: fmtCurrency(totalDue), tone: dueTone(totalDue) },
+            { label: "Discounts Given", value: fmtCurrency(totalDiscount), tone: "warning" },
+            { label: "Tax Charged", value: fmtCurrency(totalTax) },
+            { label: "Cost of Goods", value: fmtCurrency(totalCOGS), tone: "muted" },
+            {
+                label: "Gross Profit",
+                value: fmtCurrency(grossProfit),
+                tone: profitTone(grossProfit),
+                note: `${margin.toFixed(1)}% margin`,
+            },
+        ]);
+
+        // Payment method breakdown for shift closing.
         const accountBreakdown: Record<string, number> = {};
         for (const sale of sales) {
             for (const p of sale.payments) {
                 const accName = p.account?.name || "Cash";
-                const netAmount = p.amount - (p.changeAmount || 0);
-                accountBreakdown[accName] = (accountBreakdown[accName] || 0) + netAmount;
+                accountBreakdown[accName] = (accountBreakdown[accName] || 0) + (p.amount - (p.changeAmount || 0));
             }
         }
         if (!accountBreakdown["Cash"] && !accountBreakdown["cash"]) {
             accountBreakdown["Cash"] = 0;
         }
 
-        // Payment Breakdown section for Shift Closing
-        doc.x = doc.page.margins.left;
-        doc.fontSize(10).font("Helvetica-Bold").text("Payment Method Breakdown (Reconciliation)", { underline: true });
-        pdfGen.moveDown(0.2);
-        doc.font('Helvetica').fontSize(9);
+        const breakdownEntries = Object.entries(accountBreakdown);
+        const breakdownTotal = breakdownEntries.reduce((sum, [, amount]) => sum + amount, 0);
 
-        const paymentTable = doc.table({
-            columnStyles: [200, 150],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f8fafc", fontSize: 9, fontStyle: "bold" } : {},
+        report.section("Payment Method Breakdown", "Net amount collected per account, for drawer reconciliation");
+        report.table({
+            columns: [
+                { label: "Payment Account / Method", width: 220 },
+                { label: "Net Amount Collected", width: 150, align: "right" },
+                { label: "", width: "*" },
+            ],
+            rows: breakdownEntries.map(([accName, amount]) => [accName, fmtCurrency(amount), ""]),
+            totalRow: [
+                { text: "Total Collected", bold: true },
+                { text: fmtCurrency(breakdownTotal), align: "right", bold: true },
+                "",
+            ],
         });
-        paymentTable.row([
-            { text: "Payment Account / Method", align: { x: "left", y: "center" } },
-            { text: "Net Amount Collected", align: { x: "right", y: "center" } },
-        ]);
-        Object.entries(accountBreakdown).forEach(([accName, amount]) => {
-            paymentTable.row([
-                { text: accName, align: { x: "left", y: "center" } },
-                { text: fmtCurrency(amount), align: { x: "right", y: "center" } },
-            ]);
-        });
-        paymentTable.end();
 
-        pdfGen.moveDown(0.5);
+        report.section("Transactions", `${sales.length} record(s)`);
 
-        // Main transactions table — 10 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, 100, '*', 80, 40, 60, 60, 70, 70, 70],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Customer", align: { x: "left", y: "center" } },
-            { text: "Cashier", align: { x: "left", y: "center" } },
-            { text: "Items", align: { x: "center", y: "center" } },
-            { text: "Discount", align: { x: "right", y: "center" } },
-            { text: "Tax", align: { x: "right", y: "center" } },
-            { text: "Total", align: { x: "right", y: "center" } },
-            { text: "Paid", align: { x: "right", y: "center" } },
-            { text: "Due", align: { x: "right", y: "center" } },
-        ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: fmtDate(row.date, "DD-MM-YYYY hh:mm A"), align: { x: "center", y: "center" } },
-                { text: row.customer, align: { x: "left", y: "center" } },
-                { text: row.cashier, align: { x: "left", y: "center" } },
-                { text: String(row.itemsCount), align: { x: "center", y: "center" } },
-                { text: fmtCurrency(row.discount), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.tax), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.total), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.paid), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.due), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalRevenue), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalPaid), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
+        if (sales.length === 0) {
+            report.note("No sales were recorded for the selected period.");
+        } else {
+            const rows: TableCell[][] = sales.map((sale, i) => {
+                const discount = sale.discount + sale.items.reduce((is, item) => is + (item.discount || 0) * item.quantity, 0);
+                const due = sale.totalAmount - sale.paidAmount;
+                return [
+                    String(i + 1),
+                    fmtDate(sale.createdAt, "DD-MM-YYYY hh:mm A"),
+                    sale.customer?.name ?? "Walk-in",
+                    sale.user?.name ?? "N/A",
+                    String(sale.items.length),
+                    fmtCurrency(discount),
+                    fmtCurrency(sale.taxAmount),
+                    fmtCurrency(sale.totalAmount),
+                    fmtCurrency(sale.paidAmount),
+                    { text: fmtCurrency(due), align: "right", tone: due > 0 ? "danger" : undefined },
+                ];
+            });
 
-        await pdfGen.sendToResponse(res, `sales-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+            report.table({
+                columns: [
+                    { label: "#", width: 26, align: "center" },
+                    { label: "Date", width: 100 },
+                    { label: "Customer", width: "*" },
+                    { label: "Cashier", width: 85 },
+                    { label: "Items", width: 38, align: "center" },
+                    { label: "Discount", width: 62, align: "right" },
+                    { label: "Tax", width: 58, align: "right" },
+                    { label: "Total", width: 72, align: "right" },
+                    { label: "Paid", width: 72, align: "right" },
+                    { label: "Due", width: 68, align: "right" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 5 },
+                    fmtCurrency(totalDiscount),
+                    fmtCurrency(totalTax),
+                    fmtCurrency(totalRevenue),
+                    fmtCurrency(totalPaid),
+                    fmtCurrency(totalDue),
+                ],
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Sales report PDF error:", error);
         res.status(500).json({ error: "Failed to generate sales report PDF", message: error instanceof Error ? error.message : "Unknown error" });
@@ -204,9 +192,7 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
             },
         });
 
-        // Group sales by user
         interface CreditSaleItem {
-            id: number;
             invoiceNo: string;
             date: Date;
             customerName: string;
@@ -231,13 +217,10 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
 
         for (const sale of sales) {
             const uId = sale.userId || 0; // 0 for Unassigned/Deleted
-            const uName = sale.user?.name || "System/Unknown";
-            const uRole = sale.user?.role || "SYSTEM";
-
             if (!cashierMap.has(uId)) {
                 cashierMap.set(uId, {
-                    name: uName,
-                    role: uRole,
+                    name: sale.user?.name || "System/Unknown",
+                    role: sale.user?.role || "SYSTEM",
                     salesCount: 0,
                     totalRevenue: 0,
                     totalCOGS: 0,
@@ -250,220 +233,127 @@ export const getCashierSalesReportPDF = async (req: Request, res: Response): Pro
             }
 
             const data = cashierMap.get(uId)!;
-            if (sale.totalAmount >= 0) {
-                data.salesCount += 1;
-            }
+            if (sale.totalAmount >= 0) data.salesCount += 1;
             data.totalRevenue += sale.totalAmount;
             data.totalDiscount += sale.discount + sale.items.reduce((is, item) => is + (item.discount || 0) * item.quantity, 0);
+            data.totalCOGS += sale.items.reduce((s, item) => s + (item.avgCostPrice ?? 0) * item.quantity, 0);
 
-            // COGS
-            const cogs = sale.items.reduce((s, item) => s + (item.avgCostPrice ?? 0) * item.quantity, 0);
-            data.totalCOGS += cogs;
-
-            // Payments breakdown
             for (const p of sale.payments) {
                 const accName = p.account?.name || "Cash";
-                const netAmount = p.amount - (p.changeAmount || 0);
-                data.payments[accName] = (data.payments[accName] || 0) + netAmount;
+                data.payments[accName] = (data.payments[accName] || 0) + (p.amount - (p.changeAmount || 0));
             }
 
-            // Track credit sales (sales with remaining due amount)
             const dueAmount = sale.totalAmount - sale.paidAmount;
             if (sale.totalAmount > 0 && dueAmount > 0.001) {
                 data.totalCreditDue += dueAmount;
                 data.creditSales.push({
-                    id: sale.id,
                     invoiceNo: sale.taxInvoiceId || `#${sale.id}`,
                     date: sale.createdAt,
                     customerName: sale.customer?.name || "Walk-in Customer",
                     customerPhone: sale.customer?.phone || "",
                     totalAmount: sale.totalAmount,
                     paidAmount: sale.paidAmount,
-                    dueAmount: dueAmount,
+                    dueAmount,
                 });
             }
         }
 
-        // Calculate gross profit for each cashier
         for (const data of cashierMap.values()) {
             data.grossProfit = data.totalRevenue - data.totalCOGS;
         }
 
         const list = Array.from(cashierMap.values());
 
-        const reportFonts = fonts();
-        const company = readSettings();
-        const pdfGen = createPDFGenerator({
-            fontRegistrations: reportFonts.registrations,
-            fontFamilyMap: reportFonts.aliasMap,
-            pdfOptions: {
-                size: "A4",
-                margins: { top: 15, bottom: 15, left: 20, right: 20 },
-            },
-            header: {
-                title: "Cashier Sales Summary Report",
-                subtitle: "Drawer Closing and Shift Reconciliation Summary",
-                companyName: (company.businessName as string) || undefined,
-                address: (company.address as string) || undefined,
-                phone: (company.phone as string) || undefined,
-                showDate: true,
-                titleFont: { family: "Helvetica-Bold" as const, size: 14, color: "#1e40af" },
-                subtitleFont: { size: 9, color: "#475569" },
-                filterInfo: {
-                    "From": from ? fmtDate(from as string) : "All Time",
-                    "To": to ? fmtDate(to as string) : "Now",
-                    "Cashiers": list.length,
-                },
-            },
-            footer: {
-                leftText: (company.businessName as string) || "POS System",
-                centerText: "Cashier Shift Closing Report",
-                showPageNumber: true,
-                font: { size: 8, color: "#666666" },
+        const report = createReport({
+            title: "Cashier Sales Summary",
+            subtitle: "Drawer closing and shift reconciliation",
+            filename: reportFilename("cashier-sales-report"),
+            filters: {
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Cashiers: list.length,
             },
         });
 
-        const doc = pdfGen.getDocument();
-        doc.x = doc.page.margins.left;
-
         if (list.length === 0) {
-            doc.fontSize(12).text("No transactions found for the selected period.", { align: "center" });
+            report.note("No transactions found for the selected period.");
         } else {
-            for (const c of list) {
-                // Section header for cashier
-                doc.fontSize(10).font("Helvetica-Bold").fillColor("#1e40af").text(`${c.name} (${c.role})`);
-                pdfGen.moveDown(0.3);
-                doc.font('Helvetica').fontSize(9);
+            list.forEach((c, index) => {
+                if (index > 0) report.divider();
+                report.section(c.name, c.role);
 
-                // Summary table
-                const sumTable = doc.table({
-                    columnStyles: [80, 95, 85, 95, 95, 100],
-                    rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f8fafc", fontSize: 9, fontStyle: "bold" } : {},
-                });
-                sumTable.row([
-                    { text: "Sales Count", align: { x: "left", y: "center" } },
-                    { text: "Total Revenue", align: { x: "right", y: "center" } },
-                    { text: "Discounts", align: { x: "right", y: "center" } },
-                    { text: "Credit / Due", align: { x: "right", y: "center" } },
-                    { text: "Total COGS", align: { x: "right", y: "center" } },
-                    { text: "Gross Profit", align: { x: "right", y: "center" } },
-                ]);
-                sumTable.row([
-                    { text: String(c.salesCount), align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(c.totalRevenue), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(c.totalDiscount), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(c.totalCreditDue), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(c.totalCOGS), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(c.grossProfit), align: { x: "right", y: "center" } },
-                ]);
-                sumTable.end();
-
-                pdfGen.moveDown(0.2);
-
-                // Payments breakdown sub-table
-                doc.fontSize(9).font("Helvetica-Bold").fillColor("#475569").text("Payment Accounts Breakdown:");
-                pdfGen.moveDown(0.15);
-                doc.font('Helvetica').fontSize(9);
-
-                const payTable = doc.table({
-                    columnStyles: [150, 120],
-                    rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f1f5f9", fontSize: 8, fontStyle: "bold" } : {},
-                });
-                payTable.row([
-                    { text: "Payment Account", align: { x: "left", y: "center" } },
-                    { text: "Net Collected", align: { x: "right", y: "center" } },
+                report.stats([
+                    { label: "Sales Count", value: String(c.salesCount), tone: "primary" },
+                    { label: "Total Revenue", value: fmtCurrency(c.totalRevenue), tone: "primary" },
+                    { label: "Discounts", value: fmtCurrency(c.totalDiscount), tone: "warning" },
+                    { label: "Credit / Due", value: fmtCurrency(c.totalCreditDue), tone: dueTone(c.totalCreditDue) },
+                    { label: "Total COGS", value: fmtCurrency(c.totalCOGS), tone: "muted" },
+                    { label: "Gross Profit", value: fmtCurrency(c.grossProfit), tone: profitTone(c.grossProfit) },
                 ]);
 
-                // Always ensure Cash is listed
                 if (!c.payments["Cash"] && !c.payments["cash"]) {
                     c.payments["Cash"] = 0;
                 }
+                const payEntries = Object.entries(c.payments);
 
-                Object.entries(c.payments).forEach(([accName, amount]) => {
-                    payTable.row([
-                        { text: accName, align: { x: "left", y: "center" } },
-                        { text: fmtCurrency(amount), align: { x: "right", y: "center" } },
-                    ]);
+                report.table({
+                    columns: [
+                        { label: "Payment Account", width: 180 },
+                        { label: "Net Collected", width: 120, align: "right" },
+                        { label: "", width: "*" },
+                    ],
+                    rows: payEntries.map(([accName, amount]) => [accName, fmtCurrency(amount), ""]),
+                    totalRow: [
+                        { text: "Total Collected" },
+                        { text: fmtCurrency(payEntries.reduce((sum, [, a]) => sum + a, 0)), align: "right" },
+                        "",
+                    ],
+                    fontSize: 8,
                 });
-                payTable.end();
-
-                pdfGen.moveDown(0.3);
-
-                // Credit Sales Details Sub-table
-                doc.fontSize(9).font("Helvetica-Bold").fillColor("#475569").text("Credit Sales Details (On Account / Unpaid Invoices):");
-                pdfGen.moveDown(0.15);
-                doc.font('Helvetica').fontSize(9);
 
                 if (c.creditSales.length === 0) {
-                    doc.fontSize(8.5).fillColor("#64748b").text("No credit sales recorded for this cashier in the selected period.");
+                    report.note("No credit sales recorded for this cashier in the selected period.");
                 } else {
-                    const creditTable = doc.table({
-                        columnStyles: [80, 85, 145, 80, 80, 80],
-                        rowStyles: (row: number) => {
-                            if (row === 0) return { backgroundColor: "#f1f5f9", fontSize: 8, fontStyle: "bold" };
-                            if (row === c.creditSales.length + 1) return { backgroundColor: "#f8fafc", fontSize: 8, fontStyle: "bold" };
-                            return { fontSize: 8 };
-                        },
+                    let sumTotal = 0;
+                    let sumPaid = 0;
+                    let sumDue = 0;
+                    const rows: TableCell[][] = c.creditSales.map((cs) => {
+                        sumTotal += cs.totalAmount;
+                        sumPaid += cs.paidAmount;
+                        sumDue += cs.dueAmount;
+                        return [
+                            cs.invoiceNo,
+                            dayjs(cs.date).format("DD-MM-YYYY HH:mm"),
+                            cs.customerPhone ? `${cs.customerName} (${cs.customerPhone})` : cs.customerName,
+                            fmtCurrency(cs.totalAmount),
+                            fmtCurrency(cs.paidAmount),
+                            { text: fmtCurrency(cs.dueAmount), align: "right", tone: "danger" },
+                        ];
                     });
 
-                    creditTable.row([
-                        { text: "Invoice #", align: { x: "left", y: "center" } },
-                        { text: "Date", align: { x: "left", y: "center" } },
-                        { text: "Customer", align: { x: "left", y: "center" } },
-                        { text: "Total Amount", align: { x: "right", y: "center" } },
-                        { text: "Paid Amount", align: { x: "right", y: "center" } },
-                        { text: "Credit Due", align: { x: "right", y: "center" } },
-                    ]);
-
-                    let sumTotalAmt = 0;
-                    let sumPaidAmt = 0;
-                    let sumDueAmt = 0;
-
-                    for (const cs of c.creditSales) {
-                        sumTotalAmt += cs.totalAmount;
-                        sumPaidAmt += cs.paidAmount;
-                        sumDueAmt += cs.dueAmount;
-
-                        creditTable.row([
-                            { text: cs.invoiceNo, align: { x: "left", y: "center" } },
-                            { text: dayjs(cs.date).format("YYYY-MM-DD HH:mm"), align: { x: "left", y: "center" } },
-                            { text: cs.customerPhone ? `${cs.customerName} (${cs.customerPhone})` : cs.customerName, align: { x: "left", y: "center" } },
-                            { text: fmtCurrency(cs.totalAmount), align: { x: "right", y: "center" } },
-                            { text: fmtCurrency(cs.paidAmount), align: { x: "right", y: "center" } },
-                            { text: fmtCurrency(cs.dueAmount), align: { x: "right", y: "center" } },
-                        ]);
-                    }
-
-                    // Summary row for credit sales
-                    creditTable.row([
-                        { text: "Total Credit Sales", align: { x: "left", y: "center" } },
-                        { text: "", align: { x: "left", y: "center" } },
-                        { text: `${c.creditSales.length} Credit Sale(s)`, align: { x: "left", y: "center" } },
-                        { text: fmtCurrency(sumTotalAmt), align: { x: "right", y: "center" } },
-                        { text: fmtCurrency(sumPaidAmt), align: { x: "right", y: "center" } },
-                        { text: fmtCurrency(sumDueAmt), align: { x: "right", y: "center" } },
-                    ]);
-
-                    creditTable.end();
+                    report.table({
+                        columns: [
+                            { label: "Invoice #", width: 78 },
+                            { label: "Date", width: 88 },
+                            { label: "Customer", width: "*" },
+                            { label: "Total", width: 78, align: "right" },
+                            { label: "Paid", width: 78, align: "right" },
+                            { label: "Credit Due", width: 78, align: "right" },
+                        ],
+                        rows,
+                        totalRow: [
+                            { text: `${c.creditSales.length} credit sale(s)`, colSpan: 3 },
+                            fmtCurrency(sumTotal),
+                            fmtCurrency(sumPaid),
+                            fmtCurrency(sumDue),
+                        ],
+                        fontSize: 8,
+                    });
                 }
-
-                // Draw a separator line between cashiers
-                pdfGen.moveDown(1.0);
-                const currentY = doc.y;
-                if (currentY < doc.page.height - doc.page.margins.bottom - 50) {
-                    doc.moveTo(doc.page.margins.left, currentY)
-                        .lineTo(doc.page.width - doc.page.margins.right, currentY)
-                        .strokeColor("#e2e8f0")
-                        .lineWidth(0.5)
-                        .stroke();
-                    pdfGen.moveDown(0.8);
-                } else {
-                    doc.addPage();
-                }
-            }
+            });
         }
 
-        await pdfGen.sendToResponse(res, `cashier-sales-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Cashier sales report PDF error:", error);
         res.status(500).json({ error: "Failed to generate cashier sales report", message: error instanceof Error ? error.message : "Unknown error" });
@@ -488,14 +378,9 @@ export const getCustomerDetailedSalesReportPDF = async (req: Request, res: Respo
                 user: { select: { name: true } },
                 items: {
                     include: {
-                        variant: {
-                            include: {
-                                product: { select: { name: true } }
-                            }
-                        }
-                    }
+                        variant: { include: { product: { select: { name: true } } } },
+                    },
                 },
-                payments: { include: { account: { select: { name: true } } } },
             },
         });
 
@@ -505,116 +390,92 @@ export const getCustomerDetailedSalesReportPDF = async (req: Request, res: Respo
         const totalPaid = sales.reduce((s, sale) => s + sale.paidAmount, 0);
         const totalDue = sales.reduce((s, sale) => s + (sale.totalAmount - sale.paidAmount), 0);
 
-        const rows = sales.map((sale, i) => {
-            const itemLines = sale.items.map(item => {
-                const name = item.variant?.product?.name || "Product";
-                const vName = item.variant?.name || "";
-                return `${name}${vName ? ` (${vName})` : ""} - ${item.quantity} x ${item.unitPrice}`;
-            }).join("\n");
-
-            return {
-                sno: i + 1,
-                date: sale.createdAt,
-                invoiceNo: sale.id ? `Sale #${sale.id}` : "N/A",
-                customer: sale.customer?.name ?? "Walk-in",
-                cashier: sale.user?.name ?? "N/A",
-                itemDetails: itemLines || "No items",
-                discount: sale.discount + sale.items.reduce((is, item) => is + (item.discount || 0) * item.quantity, 0),
-                tax: sale.taxAmount,
-                total: sale.totalAmount,
-                paid: sale.paidAmount,
-                due: sale.totalAmount - sale.paidAmount,
-            };
-        });
-
         let custName = "All";
         if (customerId) {
             const c = await prisma.customer.findUnique({ where: { id: parseInt(customerId as string) }, select: { name: true } });
             if (c) custName = c.name;
         }
 
-        const salesCount = sales.length;
-        const salesQr = await generateQRBuffer(`Detailed Sales Report | Customer: ${custName} | Txns: ${salesCount}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Detailed Sales Report", "Detailed Customer Sales Summary", {
-                "From": from ? fmtDate(from as string) : "All Time",
-                "To": to ? fmtDate(to as string) : "Now",
-                "Customer": custName,
-                "Transactions": salesCount,
-            }, "landscape", "A4", salesQr)
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary section
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Detailed Sales Report",
+            subtitle: "Line-item breakdown per invoice",
+            filename: reportFilename("detailed-sales-report"),
+            orientation: "landscape",
+            filters: {
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Customer: custName,
+                Transactions: sales.length,
+            },
         });
-        summaryTable.row([
-            { text: "Total Revenue", align: { x: "left", y: "center" } },
-            { text: "Total Discount", align: { x: "left", y: "center" } },
-            { text: "Total Tax", align: { x: "left", y: "center" } },
-            { text: "Total Paid", align: { x: "left", y: "center" } },
-            { text: "Total Due", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: fmtCurrency(totalRevenue), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalPaid), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.5);
-
-        // Main transactions table — 11 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [20, 80, 50, 80, 60, 240, 50, 40, 60, 60, 60],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 9, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Inv No", align: { x: "center", y: "center" } },
-            { text: "Customer", align: { x: "left", y: "center" } },
-            { text: "Cashier", align: { x: "left", y: "center" } },
-            { text: "Item Details (Product - Qty x Price)", align: { x: "left", y: "center" } },
-            { text: "Discount", align: { x: "right", y: "center" } },
-            { text: "Tax", align: { x: "right", y: "center" } },
-            { text: "Total", align: { x: "right", y: "center" } },
-            { text: "Paid", align: { x: "right", y: "center" } },
-            { text: "Due", align: { x: "right", y: "center" } },
+        report.stats([
+            { label: "Total Revenue", value: fmtCurrency(totalRevenue), tone: "primary", note: `${sales.length} invoices` },
+            { label: "Amount Collected", value: fmtCurrency(totalPaid), tone: "success" },
+            { label: "Outstanding Due", value: fmtCurrency(totalDue), tone: dueTone(totalDue) },
+            { label: "Discounts Given", value: fmtCurrency(totalDiscount), tone: "warning" },
+            { label: "Tax Charged", value: fmtCurrency(totalTax) },
         ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: fmtDate(row.date, "DD-MM-YYYY hh:mm A"), align: { x: "center", y: "center" } },
-                { text: row.invoiceNo, align: { x: "center", y: "center" } },
-                { text: row.customer, align: { x: "left", y: "center" } },
-                { text: row.cashier, align: { x: "left", y: "center" } },
-                { text: row.itemDetails, align: { x: "left", y: "center" } },
-                { text: fmtCurrency(row.discount), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.tax), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.total), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.paid), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.due), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(8);
-        table.row([
-            { text: "Grand Total", colSpan: 6, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalRevenue), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalPaid), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
 
-        await pdfGen.sendToResponse(res, `detailed-sales-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        report.section("Invoices", `${sales.length} record(s)`);
+
+        if (sales.length === 0) {
+            report.note("No sales were recorded for the selected period.");
+        } else {
+            const rows: TableCell[][] = sales.map((sale, i) => {
+                const itemLines = sale.items
+                    .map((item) => {
+                        const name = item.variant?.product?.name || "Product";
+                        const vName = item.variant?.name || "";
+                        return `${name}${vName ? ` (${vName})` : ""} - ${item.quantity} x ${item.unitPrice}`;
+                    })
+                    .join("\n");
+                const discount = sale.discount + sale.items.reduce((is, item) => is + (item.discount || 0) * item.quantity, 0);
+                const due = sale.totalAmount - sale.paidAmount;
+
+                return [
+                    String(i + 1),
+                    fmtDate(sale.createdAt, "DD-MM-YYYY hh:mm A"),
+                    `#${sale.id}`,
+                    sale.customer?.name ?? "Walk-in",
+                    sale.user?.name ?? "N/A",
+                    itemLines || "No items",
+                    fmtCurrency(discount),
+                    fmtCurrency(sale.taxAmount),
+                    fmtCurrency(sale.totalAmount),
+                    fmtCurrency(sale.paidAmount),
+                    { text: fmtCurrency(due), align: "right", tone: due > 0 ? "danger" : undefined },
+                ];
+            });
+
+            report.table({
+                columns: [
+                    { label: "#", width: 24, align: "center" },
+                    { label: "Date", width: 92 },
+                    { label: "Invoice", width: 48, align: "center" },
+                    { label: "Customer", width: 78 },
+                    { label: "Cashier", width: 62 },
+                    { label: "Items (product · qty × price)", width: "*", wrap: true },
+                    { label: "Discount", width: 56, align: "right" },
+                    { label: "Tax", width: 46, align: "right" },
+                    { label: "Total", width: 62, align: "right" },
+                    { label: "Paid", width: 62, align: "right" },
+                    { label: "Due", width: 60, align: "right" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 6 },
+                    fmtCurrency(totalDiscount),
+                    fmtCurrency(totalTax),
+                    fmtCurrency(totalRevenue),
+                    fmtCurrency(totalPaid),
+                    fmtCurrency(totalDue),
+                ],
+                fontSize: 7.5,
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Detailed sales report PDF error:", error);
         res.status(500).json({ error: "Failed to generate detailed sales report PDF", message: error instanceof Error ? error.message : "Unknown error" });

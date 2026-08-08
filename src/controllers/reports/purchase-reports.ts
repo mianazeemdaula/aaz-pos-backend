@@ -1,16 +1,21 @@
 import { Request, Response } from "express";
 import dayjs from "dayjs";
 import { prisma } from "../../prisma/prisma";
-import { generateSignatureSection } from "../../utils/pdf/pdfkit-components";
 import {
     fmtDate,
     fmtCurrency,
-    pdfConfig,
-    generateQRBuffer,
-    createPDFGenerator,
-    safeAvgCost
+    createReport,
+    reportFilename,
+    sendReport,
+    safeAvgCost,
 } from "./helpers";
+import type { TableCell } from "../../utils/pdf/report-spec";
 import { computeSupplierBalance } from "../../utils/balance";
+
+const SIGN_OFF = [
+    { label: "Prepared By", name: "_________________", title: "Accountant" },
+    { label: "Approved By", name: "_________________", title: "Manager" },
+];
 
 export const getPurchasesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to } = req.query;
@@ -34,95 +39,73 @@ export const getPurchasesReportPDF = async (req: Request, res: Response): Promis
         const totalDiscount = purchases.reduce((s, p) => s + p.discount, 0);
         const totalTax = purchases.reduce((s, p) => s + p.taxAmount, 0);
 
-        const rows = purchases.map((p, i) => ({
-            sno: i + 1,
-            date: p.date,
-            supplier: p.supplier?.name ?? "N/A",
-            invoiceNo: p.invoiceNo ?? "N/A",
-            itemsCount: p.items.length,
-            discount: p.discount,
-            tax: p.taxAmount,
-            total: p.totalAmount,
-            paid: p.paidAmount,
-            due: p.totalAmount - p.paidAmount,
-        }));
-
-        const purchQr = await generateQRBuffer(`Purchases Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Orders: ${purchases.length}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Purchases Report", "Purchase Order Summary", {
-                "From": from ? fmtDate(from as string) : "All Time",
-                "To": to ? fmtDate(to as string) : "Now",
-                "Total Orders": purchases.length,
-            }, "landscape", "A4", purchQr)
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Purchases Report",
+            subtitle: "Purchase order summary",
+            filename: reportFilename("purchases-report"),
+            orientation: "landscape",
+            filters: {
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Orders: purchases.length,
+            },
         });
-        summaryTable.row([
-            { text: "Total Cost", align: { x: "left", y: "center" } },
-            { text: "Total Discount", align: { x: "left", y: "center" } },
-            { text: "Total Tax", align: { x: "left", y: "center" } },
-            { text: "Total Due", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: fmtCurrency(totalCost), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.5);
-
-        // Purchases table — 10 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, 80, "*", 80, 50, 70, 70, 80, 80, 80],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Supplier", align: { x: "left", y: "center" } },
-            { text: "Invoice No.", align: { x: "center", y: "center" } },
-            { text: "Items", align: { x: "center", y: "center" } },
-            { text: "Discount", align: { x: "right", y: "center" } },
-            { text: "Tax", align: { x: "right", y: "center" } },
-            { text: "Total", align: { x: "right", y: "center" } },
-            { text: "Paid", align: { x: "right", y: "center" } },
-            { text: "Due", align: { x: "right", y: "center" } },
+        report.stats([
+            { label: "Total Purchases", value: fmtCurrency(totalCost), tone: "primary", note: `${purchases.length} orders` },
+            { label: "Amount Paid", value: fmtCurrency(totalPaid), tone: "success" },
+            { label: "Payable Due", value: fmtCurrency(totalDue), tone: totalDue > 0 ? "danger" : "muted" },
+            { label: "Discounts Received", value: fmtCurrency(totalDiscount), tone: "warning" },
+            { label: "Tax Paid", value: fmtCurrency(totalTax) },
         ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: fmtDate(row.date, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: row.supplier, align: { x: "left", y: "center" } },
-                { text: row.invoiceNo, align: { x: "center", y: "center" } },
-                { text: String(row.itemsCount), align: { x: "center", y: "center" } },
-                { text: fmtCurrency(row.discount), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.tax), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.total), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.paid), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.due), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCost), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalPaid), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
 
-        await pdfGen.sendToResponse(res, `purchases-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        report.section("Purchase Orders", `${purchases.length} record(s)`);
+
+        if (purchases.length === 0) {
+            report.note("No purchases were recorded for the selected period.");
+        } else {
+            const rows: TableCell[][] = purchases.map((p, i) => {
+                const due = p.totalAmount - p.paidAmount;
+                return [
+                    String(i + 1),
+                    fmtDate(p.date, "DD-MM-YYYY"),
+                    p.supplier?.name ?? "N/A",
+                    p.invoiceNo ?? "N/A",
+                    String(p.items.length),
+                    fmtCurrency(p.discount),
+                    fmtCurrency(p.taxAmount),
+                    fmtCurrency(p.totalAmount),
+                    fmtCurrency(p.paidAmount),
+                    { text: fmtCurrency(due), align: "right" as const, tone: due > 0 ? ("danger" as const) : undefined },
+                ];
+            });
+
+            report.table({
+                columns: [
+                    { label: "#", width: 26, align: "center" },
+                    { label: "Date", width: 76, align: "center" },
+                    { label: "Supplier", width: "*" },
+                    { label: "Invoice No.", width: 88, align: "center" },
+                    { label: "Items", width: 44, align: "center" },
+                    { label: "Discount", width: 70, align: "right" },
+                    { label: "Tax", width: 64, align: "right" },
+                    { label: "Total", width: 80, align: "right" },
+                    { label: "Paid", width: 80, align: "right" },
+                    { label: "Due", width: 78, align: "right" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 5 },
+                    fmtCurrency(totalDiscount),
+                    fmtCurrency(totalTax),
+                    fmtCurrency(totalCost),
+                    fmtCurrency(totalPaid),
+                    fmtCurrency(totalDue),
+                ],
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Purchases report PDF error:", error);
         res.status(500).json({ error: "Failed to generate purchases report PDF", message: error instanceof Error ? error.message : "Unknown error" });
@@ -140,18 +123,16 @@ export const getSupplierBusinessReportPDF = async (req: Request, res: Response):
         const supplier = await prisma.supplier.findUnique({ where: { id: supplierId } });
         if (!supplier) { res.status(404).json({ error: "Supplier not found" }); return; }
 
-        // Fetch all purchases from this supplier in date range
         const purchases = await prisma.purchase.findMany({
             where: { supplierId, date: { gte: from, lte: to } },
             include: { items: { include: { product: true } } },
             orderBy: { date: "desc" },
         });
 
-        // Fetch purchase returns (returns have negative totalAmount)
+        // Returns are stored as purchases with a negative total.
         const returns = purchases.filter(p => p.totalAmount < 0);
         const regularPurchases = purchases.filter(p => p.totalAmount >= 0);
 
-        // Fetch payments in date range
         const payments = await prisma.supplierPayment.findMany({
             where: { supplierId, date: { gte: from, lte: to } },
             include: { account: true },
@@ -164,154 +145,106 @@ export const getSupplierBusinessReportPDF = async (req: Request, res: Response):
         const totalPayments = payments.reduce((s, p) => s + p.amount, 0);
         const totalItems = regularPurchases.reduce((s, p) => s + (p.items?.length ?? 0), 0);
         const netBusiness = totalPurchases - totalReturns;
-
-        const qr = await generateQRBuffer(`Supplier Business: ${supplier.name} | ${fmtDate(from)} - ${fmtDate(to)} | Net: ${fmtCurrency(netBusiness)}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig(
-                "Supplier Business Report",
-                `${supplier.name} — ${fmtDate(from)} to ${fmtDate(to)}`,
-                {
-                    "Supplier": supplier.name,
-                    "Phone": supplier.phone ?? "N/A",
-                    "Period": `${fmtDate(from)} — ${fmtDate(to)}`,
-                },
-                "portrait", "A4", qr
-            )
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary table
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        summaryTable.row([
-            { text: "Total Purchases", align: { x: "left", y: "center" } },
-            { text: "Total Returns", align: { x: "left", y: "center" } },
-            { text: "Net Business", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: `Rs ${fmtCurrency(totalPurchases)}`, align: { x: "left", y: "center" } },
-            { text: `Rs ${fmtCurrency(totalReturns)}`, align: { x: "left", y: "center" } },
-            { text: `Rs ${fmtCurrency(netBusiness)}`, align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: "Total Paid (on purchases)", align: { x: "left", y: "center" } },
-            { text: "Standalone Payments", align: { x: "left", y: "center" } },
-            { text: "Current Balance", align: { x: "left", y: "center" } },
-        ]);
         const currentBalance = await computeSupplierBalance(supplierId);
 
-        summaryTable.row([
-            { text: `Rs ${fmtCurrency(totalPaid)}`, align: { x: "left", y: "center" } },
-            { text: `Rs ${fmtCurrency(totalPayments)}`, align: { x: "left", y: "center" } },
-            { text: `Rs ${fmtCurrency(currentBalance)}`, align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
-        pdfGen.moveDown(0.5);
-
-        // Purchases table
-        if (regularPurchases.length > 0) {
-            doc.fontSize(11).font("Helvetica-Bold").fillColor("#1e3a8a").text(`Purchases (${regularPurchases.length})`, doc.page.margins.left);
-            doc.moveDown(0.3);
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 60, 75, 75, 75, 75, 60],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#dbeafe", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "PO #", "Date", "Total", "Paid", "Due", "Items"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            regularPurchases.forEach((p, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: p.invoiceNo ?? `PO-${p.id}`, align: { x: "center", y: "center" } },
-                    { text: fmtDate(p.date), align: { x: "center", y: "center" } },
-                    { text: fmtCurrency(p.totalAmount), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(p.paidAmount), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(Math.max(0, p.totalAmount - p.paidAmount)), align: { x: "right", y: "center" } },
-                    { text: String(p.items?.length ?? 0), align: { x: "center", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total", colSpan: 3, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPurchases), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPaid), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPurchases - totalPaid), align: { x: "right", y: "center" } },
-                { text: String(totalItems), align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.5);
-        }
-
-        // Returns table
-        if (returns.length > 0) {
-            doc.fontSize(11).font("Helvetica-Bold").fillColor("#9a3412").text(`Returns (${returns.length})`, doc.page.margins.left);
-            doc.moveDown(0.3);
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 75, 75, 75, 60],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ffedd5", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Date", "Amount", "Items", "Invoice"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            returns.forEach((r, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(r.date), align: { x: "center", y: "center" } },
-                    { text: fmtCurrency(r.totalAmount), align: { x: "right", y: "center" } },
-                    { text: String(r.items?.length ?? 0), align: { x: "center", y: "center" } },
-                    { text: r.invoiceNo ?? `PRTN-${r.id}`, align: { x: "center", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total Returns", colSpan: 2, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalReturns), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            t.end();
-            pdfGen.moveDown(0.5);
-        }
-
-        // Payments table
-        if (payments.length > 0) {
-            doc.fontSize(11).font("Helvetica-Bold").fillColor("#0f766e").text(`Payments (${payments.length})`, doc.page.margins.left);
-            doc.moveDown(0.3);
-            doc.x = doc.page.margins.left;
-            doc.fontSize(8);
-            const t = doc.table({
-                columnStyles: [30, 75, "*", 80],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#ccfbf1", fontStyle: "bold", fontSize: 9 } : {},
-            });
-            t.row(["#", "Date", "Account", "Amount"].map(h => ({ text: h, align: { x: "center", y: "center" } })));
-            payments.forEach((p, i) => {
-                t.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: fmtDate(p.date), align: { x: "center", y: "center" } },
-                    { text: p.account?.name ?? "N/A", align: { x: "left", y: "center" } },
-                    { text: fmtCurrency(p.amount), align: { x: "right", y: "center" } },
-                ]);
-            });
-            t.row([
-                { text: "Total Payments", colSpan: 3, align: { x: "right", y: "center" } },
-                { text: fmtCurrency(totalPayments), align: { x: "right", y: "center" } },
-            ]);
-            t.end();
-        }
-
-        generateSignatureSection(doc, {
-            signatures: [
-                { label: "Prepared By", name: "_________________", title: "Accountant" },
-                { label: "Approved By", name: "_________________", title: "Manager" },
-            ],
-            spacing: 30,
-            lineWidth: 120,
-            labelFont: { family: "Helvetica-Bold", size: 8 },
-            nameFont: { size: 9 },
+        const report = createReport({
+            title: "Supplier Business Report",
+            subtitle: `${supplier.name} — ${fmtDate(from)} to ${fmtDate(to)}`,
+            filename: `supplier-business-${supplier.name.replace(/\s+/g, "-")}-${dayjs(from).format("YYYY-MM-DD")}-${dayjs(to).format("YYYY-MM-DD")}.pdf`,
+            filters: {
+                Supplier: supplier.name,
+                Phone: supplier.phone ?? "N/A",
+                Period: `${fmtDate(from)} — ${fmtDate(to)}`,
+            },
         });
 
-        await pdfGen.sendToResponse(res, `supplier-business-${supplier.name.replace(/\s+/g, "-")}-${dayjs(from).format("YYYY-MM-DD")}-${dayjs(to).format("YYYY-MM-DD")}.pdf`);
+        report.stats([
+            { label: "Total Purchases", value: fmtCurrency(totalPurchases), tone: "primary", note: `${regularPurchases.length} orders` },
+            { label: "Returns", value: fmtCurrency(totalReturns), tone: "warning" },
+            { label: "Net Business", value: fmtCurrency(netBusiness), tone: "primary" },
+            { label: "Paid on Purchases", value: fmtCurrency(totalPaid), tone: "success" },
+            { label: "Standalone Payments", value: fmtCurrency(totalPayments), tone: "success" },
+            {
+                label: "Current Balance",
+                value: fmtCurrency(currentBalance),
+                tone: currentBalance > 0 ? "danger" : "muted",
+                note: currentBalance > 0 ? "payable to supplier" : undefined,
+            },
+        ]);
+
+        if (regularPurchases.length > 0) {
+            report.section("Purchases", `${regularPurchases.length} order(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "PO #", width: 90, align: "center" },
+                    { label: "Date", width: 84, align: "center" },
+                    { label: "Total", width: "*", align: "right" },
+                    { label: "Paid", width: 88, align: "right" },
+                    { label: "Due", width: 88, align: "right" },
+                    { label: "Items", width: 52, align: "center" },
+                ],
+                rows: regularPurchases.map((p, i) => [
+                    String(i + 1),
+                    p.invoiceNo ?? `PO-${p.id}`,
+                    fmtDate(p.date),
+                    fmtCurrency(p.totalAmount),
+                    fmtCurrency(p.paidAmount),
+                    fmtCurrency(Math.max(0, p.totalAmount - p.paidAmount)),
+                    String(p.items?.length ?? 0),
+                ]),
+                totalRow: [
+                    { text: "Total", colSpan: 3 },
+                    fmtCurrency(totalPurchases),
+                    fmtCurrency(totalPaid),
+                    fmtCurrency(totalPurchases - totalPaid),
+                    String(totalItems),
+                ],
+            });
+        }
+
+        if (returns.length > 0) {
+            report.section("Returns", `${returns.length} return(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Date", width: 90, align: "center" },
+                    { label: "Invoice", width: "*" },
+                    { label: "Items", width: 60, align: "center" },
+                    { label: "Amount", width: 100, align: "right" },
+                ],
+                rows: returns.map((r, i) => [
+                    String(i + 1),
+                    fmtDate(r.date),
+                    r.invoiceNo ?? `PRTN-${r.id}`,
+                    String(r.items?.length ?? 0),
+                    { text: fmtCurrency(r.totalAmount), align: "right" as const, tone: "warning" as const },
+                ]),
+                totalRow: [{ text: "Total Returns", colSpan: 4 }, fmtCurrency(totalReturns)],
+            });
+        }
+
+        if (payments.length > 0) {
+            report.section("Payments", `${payments.length} payment(s)`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Date", width: 90, align: "center" },
+                    { label: "Account", width: "*" },
+                    { label: "Amount", width: 100, align: "right" },
+                ],
+                rows: payments.map((p, i) => [
+                    String(i + 1),
+                    fmtDate(p.date),
+                    p.account?.name ?? "N/A",
+                    fmtCurrency(p.amount),
+                ]),
+                totalRow: [{ text: "Total Payments", colSpan: 3 }, fmtCurrency(totalPayments)],
+            });
+        }
+
+        report.signatures(SIGN_OFF);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Supplier business report PDF error:", error);
         res.status(500).json({ error: "Failed to generate supplier business report", message: error instanceof Error ? error.message : "Unknown error" });
@@ -333,11 +266,7 @@ export const getSupplierDetailedPurchasesReportPDF = async (req: Request, res: R
             orderBy: { date: "desc" },
             include: {
                 supplier: { select: { name: true } },
-                items: {
-                    include: {
-                        product: { select: { name: true } }
-                    }
-                },
+                items: { include: { product: { select: { name: true } } } },
             },
         });
 
@@ -347,109 +276,85 @@ export const getSupplierDetailedPurchasesReportPDF = async (req: Request, res: R
         const totalDiscount = purchases.reduce((s, p) => s + p.discount, 0);
         const totalTax = purchases.reduce((s, p) => s + p.taxAmount, 0);
 
-        const rows = purchases.map((p, i) => {
-            const itemLines = p.items.map(item => {
-                const name = item.product?.name || "Product";
-                return `${name} - ${item.quantity} x ${item.unitCost}`;
-            }).join("\n");
-
-            return {
-                sno: i + 1,
-                date: p.date,
-                supplier: p.supplier?.name ?? "N/A",
-                invoiceNo: p.invoiceNo ?? `PO-${p.id}`,
-                itemDetails: itemLines || "No items",
-                discount: p.discount,
-                tax: p.taxAmount,
-                total: p.totalAmount,
-                paid: p.paidAmount,
-                due: p.totalAmount - p.paidAmount,
-            };
-        });
-
         let supName = "All";
         if (supplierId) {
             const s = await prisma.supplier.findUnique({ where: { id: parseInt(supplierId as string) }, select: { name: true } });
             if (s) supName = s.name;
         }
 
-        const purchQr = await generateQRBuffer(`Detailed Purchases Report | Supplier: ${supName} | Orders: ${purchases.length}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Detailed Purchases Report", "Detailed Supplier Purchases Summary", {
-                "From": from ? fmtDate(from as string) : "All Time",
-                "To": to ? fmtDate(to as string) : "Now",
-                "Supplier": supName,
-                "Total Orders": purchases.length,
-            }, "landscape", "A4", purchQr)
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Detailed Purchases Report",
+            subtitle: "Line-item breakdown per purchase order",
+            filename: reportFilename("detailed-purchases-report"),
+            orientation: "landscape",
+            filters: {
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Supplier: supName,
+                Orders: purchases.length,
+            },
         });
-        summaryTable.row([
-            { text: "Total Cost", align: { x: "left", y: "center" } },
-            { text: "Total Discount", align: { x: "left", y: "center" } },
-            { text: "Total Tax", align: { x: "left", y: "center" } },
-            { text: "Total Due", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: fmtCurrency(totalCost), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.5);
-
-        // Purchases table — 10 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [20, 80, 70, 100, 250, 50, 40, 60, 60, 70],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 9, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Invoice No.", align: { x: "center", y: "center" } },
-            { text: "Supplier", align: { x: "left", y: "center" } },
-            { text: "Item Details (Product - Qty x Cost)", align: { x: "left", y: "center" } },
-            { text: "Discount", align: { x: "right", y: "center" } },
-            { text: "Tax", align: { x: "right", y: "center" } },
-            { text: "Total", align: { x: "right", y: "center" } },
-            { text: "Paid", align: { x: "right", y: "center" } },
-            { text: "Due", align: { x: "right", y: "center" } },
+        report.stats([
+            { label: "Total Purchases", value: fmtCurrency(totalCost), tone: "primary", note: `${purchases.length} orders` },
+            { label: "Amount Paid", value: fmtCurrency(totalPaid), tone: "success" },
+            { label: "Payable Due", value: fmtCurrency(totalDue), tone: totalDue > 0 ? "danger" : "muted" },
+            { label: "Discounts Received", value: fmtCurrency(totalDiscount), tone: "warning" },
+            { label: "Tax Paid", value: fmtCurrency(totalTax) },
         ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: fmtDate(row.date, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: row.invoiceNo, align: { x: "center", y: "center" } },
-                { text: row.supplier, align: { x: "left", y: "center" } },
-                { text: row.itemDetails, align: { x: "left", y: "center" } },
-                { text: fmtCurrency(row.discount), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.tax), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.total), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.paid), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.due), align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(8);
-        table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDiscount), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalTax), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCost), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalPaid), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalDue), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
 
-        await pdfGen.sendToResponse(res, `detailed-purchases-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        report.section("Purchase Orders", `${purchases.length} record(s)`);
+
+        if (purchases.length === 0) {
+            report.note("No purchases were recorded for the selected period.");
+        } else {
+            const rows: TableCell[][] = purchases.map((p, i) => {
+                const itemLines = p.items
+                    .map((item) => `${item.product?.name || "Product"} - ${item.quantity} x ${item.unitCost}`)
+                    .join("\n");
+                const due = p.totalAmount - p.paidAmount;
+
+                return [
+                    String(i + 1),
+                    fmtDate(p.date, "DD-MM-YYYY"),
+                    p.invoiceNo ?? `PO-${p.id}`,
+                    p.supplier?.name ?? "N/A",
+                    itemLines || "No items",
+                    fmtCurrency(p.discount),
+                    fmtCurrency(p.taxAmount),
+                    fmtCurrency(p.totalAmount),
+                    fmtCurrency(p.paidAmount),
+                    { text: fmtCurrency(due), align: "right" as const, tone: due > 0 ? ("danger" as const) : undefined },
+                ];
+            });
+
+            report.table({
+                columns: [
+                    { label: "#", width: 24, align: "center" },
+                    { label: "Date", width: 74, align: "center" },
+                    { label: "Invoice", width: 78, align: "center" },
+                    { label: "Supplier", width: 96 },
+                    { label: "Items (product · qty × cost)", width: "*", wrap: true },
+                    { label: "Discount", width: 58, align: "right" },
+                    { label: "Tax", width: 50, align: "right" },
+                    { label: "Total", width: 66, align: "right" },
+                    { label: "Paid", width: 66, align: "right" },
+                    { label: "Due", width: 64, align: "right" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 5 },
+                    fmtCurrency(totalDiscount),
+                    fmtCurrency(totalTax),
+                    fmtCurrency(totalCost),
+                    fmtCurrency(totalPaid),
+                    fmtCurrency(totalDue),
+                ],
+                fontSize: 7.5,
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Detailed purchases report PDF error:", error);
         res.status(500).json({ error: "Failed to generate detailed purchases report PDF", message: error instanceof Error ? error.message : "Unknown error" });
@@ -508,84 +413,62 @@ export const getPurchaseOrderRecommendationPDF = async (req: Request, res: Respo
             orderBy: { name: "asc" },
         });
 
+        const scope: Record<string, string | number> = {};
+        if (categoryId) {
+            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
+            if (cat) scope.Category = cat.name;
+        }
+        if (brandId) {
+            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
+            if (br) scope.Brand = br.name;
+        }
+
         if (products.length === 0) {
-            const emptyQr = await generateQRBuffer(`PO Rec Report | No Products`);
-            const pdfGen = createPDFGenerator(
-                pdfConfig(
-                    "Purchase Order Recommendation Report",
-                    "Supplier & Quantity Recommendations based on Sales Velocity",
-                    { "Products": 0 },
-                    "landscape",
-                    "A4",
-                    emptyQr
-                )
-            );
-            const doc = pdfGen.getDocument();
-            doc.x = doc.page.margins.left;
-            doc.text("No products found matching filters.");
-            await pdfGen.sendToResponse(res, `purchase-order-recommendation-${dayjs().format("YYYY-MM-DD")}.pdf`);
+            const empty = createReport({
+                title: "Purchase Order Recommendation",
+                subtitle: "Supplier and quantity recommendations from sales velocity",
+                filename: reportFilename("purchase-order-recommendation"),
+                orientation: "landscape",
+                filters: { ...scope, Products: 0 },
+            });
+            empty.note("No products found matching the selected filters.");
+            await sendReport(res, empty);
             return;
         }
 
-        // 1. Fetch sales quantities of these products in the date range
+        // 1. Sales quantities of these products in the date range.
         const saleItems = await prisma.saleItem.findMany({
             where: {
-                sale: {
-                    createdAt: {
-                        gte: fromDate,
-                        lte: toDate,
-                    },
-                },
-                variant: {
-                    productId: { in: products.map(p => p.id) }
-                }
+                sale: { createdAt: { gte: fromDate, lte: toDate } },
+                variant: { productId: { in: products.map(p => p.id) } },
             },
             select: {
                 quantity: true,
-                variant: {
-                    select: {
-                        productId: true,
-                        factor: true
-                    }
-                }
-            }
+                variant: { select: { productId: true, factor: true } },
+            },
         });
 
         const salesByProductId: Record<number, number> = {};
         for (const item of saleItems) {
             const prodId = item.variant.productId;
-            const baseQty = item.quantity * (item.variant.factor || 1);
-            salesByProductId[prodId] = (salesByProductId[prodId] || 0) + baseQty;
+            salesByProductId[prodId] = (salesByProductId[prodId] || 0) + item.quantity * (item.variant.factor || 1);
         }
 
-        // 2. Fetch historical purchase suppliers for each product (most recent first)
+        // 2. Most recent supplier per product.
         const purchaseItems = await prisma.purchaseItem.findMany({
-            where: {
-                productId: { in: products.map(p => p.id) }
-            },
+            where: { productId: { in: products.map(p => p.id) } },
             select: {
                 productId: true,
                 purchase: {
                     select: {
                         date: true,
-                        supplier: {
-                            select: {
-                                id: true,
-                                name: true,
-                                phone: true
-                            }
-                        }
-                    }
-                }
+                        supplier: { select: { id: true, name: true, phone: true } },
+                    },
+                },
             },
-            orderBy: {
-                purchase: {
-                    date: "desc"
-                }
-            }
+            orderBy: { purchase: { date: "desc" } },
         });
 
-        // Map product ID to their most recent supplier
         const supplierByProductId: Record<number, { id: number; name: string; phone: string | null }> = {};
         for (const item of purchaseItems) {
             const prodId = item.productId;
@@ -594,32 +477,16 @@ export const getPurchaseOrderRecommendationPDF = async (req: Request, res: Respo
             }
         }
 
-        // 3. Category fallback supplier mapping
+        // 3. Category fallback supplier mapping.
         const categoryPurchaseItems = await prisma.purchaseItem.findMany({
-            where: {
-                product: {
-                    categoryId: { in: products.map(p => p.categoryId) }
-                }
-            },
+            where: { product: { categoryId: { in: products.map(p => p.categoryId) } } },
             select: {
                 product: { select: { categoryId: true } },
                 purchase: {
-                    select: {
-                        supplier: {
-                            select: {
-                                id: true,
-                                name: true,
-                                phone: true
-                            }
-                        }
-                    }
-                }
+                    select: { supplier: { select: { id: true, name: true, phone: true } } },
+                },
             },
-            orderBy: {
-                purchase: {
-                    date: "desc"
-                }
-            }
+            orderBy: { purchase: { date: "desc" } },
         });
 
         const categorySuppliers: Record<number, { id: number; name: string; phone: string | null }> = {};
@@ -631,27 +498,23 @@ export const getPurchaseOrderRecommendationPDF = async (req: Request, res: Respo
             }
         }
 
-        // 4. Compute recommendation
+        // 4. Compute recommendations.
         const rows = products.map((product) => {
             const currentStock = product.totalStock;
             const reorderLevel = product.reorderLevel;
             const soldBaseQty = salesByProductId[product.id] || 0;
             const velocity = soldBaseQty / days;
-            
-            // Forecast is to cover the same length of period (days)
+
+            // Forecast covers the same length of period.
             const forecastDemand = Math.round(velocity * days);
-            
-            // Need reorder?
             const needsReorder = currentStock <= reorderLevel || currentStock < forecastDemand;
-            
-            // If needs reorder, build a healthy buffer (max of forecast or double reorder level)
+
+            // Build a healthy buffer: the forecast, or double the reorder level.
             const targetStock = Math.max(forecastDemand, reorderLevel * 2);
             const recommendedQty = needsReorder ? Math.max(0, targetStock - currentStock) : 0;
-            
-            const cost = safeAvgCost(product.avgCostPrice, product.variants[0]?.price ?? 0);
-            const estCost = recommendedQty * cost;
 
-            // Get supplier
+            const cost = safeAvgCost(product.avgCostPrice, product.variants[0]?.price ?? 0);
+
             let recSupplier = supplierByProductId[product.id];
             let supplierType = "Direct";
             if (!recSupplier) {
@@ -660,7 +523,6 @@ export const getPurchaseOrderRecommendationPDF = async (req: Request, res: Respo
             }
 
             return {
-                id: product.id,
                 name: product.name,
                 category: product.category.name,
                 brand: product.brand?.name ?? "N/A",
@@ -670,131 +532,83 @@ export const getPurchaseOrderRecommendationPDF = async (req: Request, res: Respo
                 soldQty: soldBaseQty,
                 recommendedQty,
                 avgCost: cost,
-                estCost,
+                estCost: recommendedQty * cost,
                 supplier: recSupplier ? `${recSupplier.name}${recSupplier.phone ? ` (${recSupplier.phone})` : ""}` : "No History",
-                supplierType
+                supplierType,
             };
         }).filter(row => row.recommendedQty > 0);
 
         const totalInvestment = rows.reduce((s, r) => s + r.estCost, 0);
         const totalQty = rows.reduce((s, r) => s + r.recommendedQty, 0);
 
-        const meta: Record<string, string | number> = {
-            "Products to Reorder": rows.length,
-            "Total Qty Recommended": totalQty,
-            "Est. Total Cost": fmtCurrency(totalInvestment),
-            "Analysis Period": `${fmtDate(fromDate)} to ${fmtDate(toDate)} (${days} days)`,
-        };
-
-        if (categoryId) {
-            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
-            if (cat) meta["Category"] = cat.name;
-        }
-        if (brandId) {
-            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
-            if (br) meta["Brand"] = br.name;
-        }
-
-        const reportQr = await generateQRBuffer(`PO Rec Report | Needing Reorder: ${rows.length} | Qty: ${totalQty} | Cost: ${fmtCurrency(totalInvestment)}`);
-        
-        const pdfGen = createPDFGenerator(
-            pdfConfig(
-                "Purchase Order Recommendation Report",
-                "Supplier & Quantity Recommendations based on Sales Velocity",
-                meta,
-                "landscape",
-                "A4",
-                reportQr
-            )
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary Cards
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
+        const report = createReport({
+            title: "Purchase Order Recommendation",
+            subtitle: "Supplier and quantity recommendations from sales velocity",
+            filename: reportFilename("purchase-order-recommendation"),
+            orientation: "landscape",
+            filters: {
+                ...scope,
+                Period: `${fmtDate(fromDate)} — ${fmtDate(toDate)}`,
+                "Lookback": `${days} days`,
+            },
         });
-        summaryTable.row([
-            { text: "Products to Order", align: { x: "left", y: "center" } },
-            { text: "Total Recommended Units", align: { x: "left", y: "center" } },
-            { text: "Estimated Investment", align: { x: "left", y: "center" } },
-            { text: "Velocity Lookback Period", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: rows.length.toString(), align: { x: "left", y: "center" } },
-            { text: totalQty.toString(), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalInvestment), align: { x: "left", y: "center" } },
-            { text: `${days} Days`, align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
 
-        pdfGen.moveDown(0.5);
+        report.stats([
+            { label: "Products to Order", value: String(rows.length), tone: rows.length ? "warning" : "success" },
+            { label: "Units Recommended", value: fmtCurrency(totalQty), tone: "primary" },
+            { label: "Estimated Investment", value: fmtCurrency(totalInvestment), tone: "primary" },
+            { label: "Velocity Lookback", value: `${days} days`, tone: "muted", note: `${fmtDate(fromDate)} — ${fmtDate(toDate)}` },
+        ]);
+
+        report.section("Recommended Orders", `${rows.length} product(s)`);
 
         if (rows.length === 0) {
-            doc.x = doc.page.margins.left;
-            doc.fontSize(10).text("All products have sufficient stock levels based on sales velocity and reorder thresholds.", { align: "center" });
+            report.note("All products have sufficient stock based on sales velocity and reorder thresholds.");
         } else {
-            // Recommendations Table
-            doc.x = doc.page.margins.left;
-            const table = doc.table({
-                columnStyles: [20, "*", 70, 65, 70, 35, 40, 35, 40, 50, 60, 120],
-                rowStyles: (row: number) => row === 0 ? { backgroundColor: "#1e293b", textColor: "#ffffff", fontSize: 9, fontStyle: "bold" } : {},
-            });
-            table.row([
-                { text: "#", align: { x: "center", y: "center" } },
-                { text: "Product Name", align: { x: "left", y: "center" } },
-                { text: "Barcode", align: { x: "center", y: "center" } },
-                { text: "Brand", align: { x: "left", y: "center" } },
-                { text: "Category", align: { x: "left", y: "center" } },
-                { text: "Stock", align: { x: "center", y: "center" } },
-                { text: "Reorder", align: { x: "center", y: "center" } },
-                { text: "Sales", align: { x: "center", y: "center" } },
-                { text: "Rec Qty", align: { x: "center", y: "center" } },
-                { text: "Avg Cost", align: { x: "right", y: "center" } },
-                { text: "Est Cost", align: { x: "right", y: "center" } },
-                { text: "Recommended Supplier", align: { x: "left", y: "center" } },
+            const tableRows: TableCell[][] = rows.map((row, i) => [
+                String(i + 1),
+                row.name,
+                row.barcode,
+                row.brand,
+                row.category,
+                String(row.currentStock),
+                String(row.reorderLevel),
+                String(row.soldQty),
+                { text: String(row.recommendedQty), align: "center" as const, bold: true, tone: "primary" as const },
+                fmtCurrency(row.avgCost),
+                fmtCurrency(row.estCost),
+                `${row.supplier} [${row.supplierType}]`,
             ]);
 
-            rows.forEach((row, i) => {
-                table.row([
-                    { text: String(i + 1), align: { x: "center", y: "center" } },
-                    { text: row.name, align: { x: "left", y: "center" } },
-                    { text: row.barcode, align: { x: "center", y: "center" } },
-                    { text: row.brand, align: { x: "left", y: "center" } },
-                    { text: row.category, align: { x: "left", y: "center" } },
-                    { text: String(row.currentStock), align: { x: "center", y: "center" } },
-                    { text: String(row.reorderLevel), align: { x: "center", y: "center" } },
-                    { text: String(row.soldQty), align: { x: "center", y: "center" } },
-                    { text: String(row.recommendedQty), align: { x: "center", y: "center" } },
-                    { text: fmtCurrency(row.avgCost), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(row.estCost), align: { x: "right", y: "center" } },
-                    { text: `${row.supplier} [${row.supplierType}]`, align: { x: "left", y: "center" } },
-                ]);
+            report.table({
+                columns: [
+                    { label: "#", width: 22, align: "center" },
+                    { label: "Product", width: "*" },
+                    { label: "Barcode", width: 72, align: "center" },
+                    { label: "Brand", width: 62 },
+                    { label: "Category", width: 68 },
+                    { label: "Stock", width: 40, align: "center" },
+                    { label: "Reorder", width: 46, align: "center" },
+                    { label: "Sold", width: 40, align: "center" },
+                    { label: "Order Qty", width: 52, align: "center" },
+                    { label: "Avg Cost", width: 56, align: "right" },
+                    { label: "Est. Cost", width: 62, align: "right" },
+                    { label: "Recommended Supplier", width: 128 },
+                ],
+                rows: tableRows,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 8 },
+                    String(totalQty),
+                    "",
+                    fmtCurrency(totalInvestment),
+                    "",
+                ],
+                fontSize: 7.5,
             });
-
-            table.row([
-                { text: "Grand Total", colSpan: 8, align: { x: "justify", y: "center" } },
-                { text: String(totalQty), align: { x: "center", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-                { text: fmtCurrency(totalInvestment), align: { x: "right", y: "center" } },
-                { text: "", align: { x: "center", y: "center" } },
-            ]);
-            table.end();
         }
 
-        generateSignatureSection(doc, {
-            signatures: [
-                { label: "Prepared By", name: "_________________", title: "Accountant" },
-                { label: "Approved By", name: "_________________", title: "Manager" },
-            ],
-            spacing: 30,
-            lineWidth: 120,
-            labelFont: { family: "Helvetica-Bold", size: 8 },
-            nameFont: { size: 9 },
-        });
-
-        await pdfGen.sendToResponse(res, `purchase-order-recommendation-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        report.signatures(SIGN_OFF);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Purchase order recommendation PDF error:", error);
         res.status(500).json({ error: "Failed to generate purchase order recommendation report", message: error instanceof Error ? error.message : "Unknown error" });

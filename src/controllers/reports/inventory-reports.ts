@@ -4,11 +4,13 @@ import { prisma } from "../../prisma/prisma";
 import {
     fmtDate,
     fmtCurrency,
-    pdfConfig,
-    generateQRBuffer,
-    createPDFGenerator,
-    safeAvgCost
+    createReport,
+    reportFilename,
+    sendReport,
+    safeAvgCost,
 } from "./helpers";
+import type { TableCell } from "../../utils/pdf/report-spec";
+import type { Tone } from "../../utils/pdf/report-theme";
 
 async function getCategoryIdsRecursively(categoryId: number): Promise<number[]> {
     const ids = [categoryId];
@@ -21,6 +23,20 @@ async function getCategoryIdsRecursively(categoryId: number): Promise<number[]> 
         ids.push(...subIds);
     }
     return ids;
+}
+
+/** Resolve the optional category/brand filters into display names. */
+async function resolveScope(categoryId?: number, brandId?: number) {
+    const scope: Record<string, string> = {};
+    if (categoryId) {
+        const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
+        if (cat) scope.Category = cat.name;
+    }
+    if (brandId) {
+        const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
+        if (br) scope.Brand = br.name;
+    }
+    return scope;
 }
 
 export const getInventoryReportPDF = async (req: Request, res: Response): Promise<void> => {
@@ -58,105 +74,83 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
         const lowStock = products.filter((p) => p.totalStock > 0 && p.totalStock <= p.reorderLevel);
         const outOfStock = products.filter((p) => p.totalStock <= 0);
         const totalValue = products.reduce((s, p) => s + p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0), 0);
+        const totalUnits = products.reduce((s, p) => s + p.totalStock, 0);
 
-        const rows = products.map((p, i) => ({
-            sno: i + 1,
-            name: p.name,
-            category: p.category.name,
-            brand: p.brand?.name ?? "N/A",
-            totalStock: p.totalStock,
-            reorderLevel: p.reorderLevel,
-            avgCost: safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0),
-            stockValue: p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0),
-            status: p.totalStock <= 0 ? "Out of Stock" : p.totalStock <= p.reorderLevel ? "Low Stock" : "OK",
-        }));
+        const report = createReport({
+            title: "Inventory Report",
+            subtitle: "Product stock overview and valuation",
+            filename: reportFilename("inventory-report"),
+            orientation: "landscape",
+            filters: {
+                ...(await resolveScope(categoryId, brandId)),
+                Products: products.length,
+            },
+        });
 
-        const meta: Record<string, string | number> = {
-            "Total Products": products.length,
-            "Low Stock": lowStock.length,
-            "Out of Stock": outOfStock.length,
-            "Total Value": fmtCurrency(totalValue),
-        };
+        report.stats([
+            { label: "Total Products", value: String(products.length), tone: "primary" },
+            { label: "Units in Stock", value: fmtCurrency(totalUnits) },
+            { label: "Inventory Value", value: fmtCurrency(totalValue), tone: "primary", note: "at average cost" },
+            { label: "Low Stock Items", value: String(lowStock.length), tone: lowStock.length ? "warning" : "muted" },
+            { label: "Out of Stock", value: String(outOfStock.length), tone: outOfStock.length ? "danger" : "muted" },
+        ]);
 
-        if (categoryId) {
-            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
-            if (cat) meta["Category"] = cat.name;
+        report.section("Products", `${products.length} record(s)`);
+
+        if (products.length === 0) {
+            report.note("No active products matched the selected filters.");
+        } else {
+            const rowTones: (Tone | undefined)[] = [];
+            const rows: TableCell[][] = products.map((p, i) => {
+                const avgCost = safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0);
+                const out = p.totalStock <= 0;
+                const low = !out && p.totalStock <= p.reorderLevel;
+                rowTones.push(out ? "danger" : low ? "warning" : undefined);
+
+                return [
+                    String(i + 1),
+                    p.name,
+                    p.category.name,
+                    p.brand?.name ?? "N/A",
+                    fmtCurrency(p.totalStock),
+                    fmtCurrency(p.reorderLevel),
+                    fmtCurrency(avgCost),
+                    fmtCurrency(p.totalStock * avgCost),
+                    {
+                        text: out ? "OUT OF STOCK" : low ? "LOW" : "OK",
+                        align: "center" as const,
+                        bold: out || low,
+                        tone: out ? ("danger" as const) : low ? ("warning" as const) : ("success" as const),
+                    },
+                ];
+            });
+
+            report.table({
+                columns: [
+                    { label: "#", width: 35, align: "center" },
+                    { label: "Product", width: "*" },
+                    { label: "Category", width: 92 },
+                    { label: "Brand", width: 80 },
+                    { label: "Stock", width: 62, align: "right" },
+                    { label: "Reorder", width: 62, align: "right" },
+                    { label: "Avg Cost", width: 74, align: "right" },
+                    { label: "Stock Value", width: 88, align: "right" },
+                    { label: "Status", width: 84, align: "center" },
+                ],
+                rows,
+                rowTones,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 4 },
+                    fmtCurrency(totalUnits),
+                    "",
+                    "",
+                    fmtCurrency(totalValue),
+                    "",
+                ],
+            });
         }
-        if (brandId) {
-            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
-            if (br) meta["Brand"] = br.name;
-        }
 
-        const qr = await generateQRBuffer(`Inventory Report | ${dayjs().format("DD-MM-YYYY")} | Products: ${products.length} | Value: ${fmtCurrency(totalValue)}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Inventory Report", "Product Stock Overview", meta, "landscape", "A4", qr)
-        );
-        const doc = pdfGen.getDocument();
-
-        // Summary
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        summaryTable.row([
-            { text: "Total Products", align: { x: "left", y: "center" } },
-            { text: "Low Stock Items", align: { x: "left", y: "center" } },
-            { text: "Out of Stock", align: { x: "left", y: "center" } },
-            { text: "Total Inventory Value", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: products.length.toString(), align: { x: "left", y: "center" } },
-            { text: lowStock.length.toString(), align: { x: "left", y: "center" } },
-            { text: outOfStock.length.toString(), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalValue), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
-
-        pdfGen.moveDown(0.5);
-
-        // Products table — 9 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, "*", 90, 80, 65, 70, 75, 90, 70],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Product", align: { x: "left", y: "center" } },
-            { text: "Category", align: { x: "left", y: "center" } },
-            { text: "Brand", align: { x: "left", y: "center" } },
-            { text: "Total Stock", align: { x: "right", y: "center" } },
-            { text: "Reorder Lvl", align: { x: "right", y: "center" } },
-            { text: "Avg Cost", align: { x: "right", y: "center" } },
-            { text: "Stock Value", align: { x: "right", y: "center" } },
-            { text: "Status", align: { x: "center", y: "center" } },
-        ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: row.name, align: { x: "left", y: "center" } },
-                { text: row.category, align: { x: "left", y: "center" } },
-                { text: row.brand, align: { x: "left", y: "center" } },
-                { text: fmtCurrency(row.totalStock), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.reorderLevel), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.avgCost), align: { x: "right", y: "center" } },
-                { text: fmtCurrency(row.stockValue), align: { x: "right", y: "center" } },
-                { text: row.status, align: { x: "center", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 4, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(products.reduce((s, p) => s + p.totalStock, 0)), align: { x: "right", y: "center" } },
-            { text: "", align: { x: "center", y: "center" } },
-            { text: "", align: { x: "center", y: "center" } },
-            { text: fmtCurrency(totalValue), align: { x: "right", y: "center" } },
-            { text: "", align: { x: "center", y: "center" } },
-        ]);
-        table.end();
-
-        await pdfGen.sendToResponse(res, `inventory-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Inventory report PDF error:", error);
         res.status(500).json({ error: "Failed to generate inventory report PDF", message: error instanceof Error ? error.message : "Unknown error" });
@@ -164,7 +158,7 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
 };
 
 export const getStockReportPDF = async (req: Request, res: Response): Promise<void> => {
-    const filter = (req.query.filter as string) ?? "all"; // all | negative | low
+    const filter = (req.query.filter as string) ?? "all"; // all | negative | low | alert
     const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
     const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
 
@@ -192,81 +186,77 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
         const lowStock = products.filter(p => p.totalStock >= 0 && p.totalStock <= p.reorderLevel);
         const normal = products.filter(p => p.totalStock > p.reorderLevel);
 
-        let rows = products;
+        let listed = products;
         let title = "Full Stock Report";
-        if (filter === "negative") { rows = negative; title = "Negative Stock Report"; }
-        else if (filter === "low") { rows = lowStock; title = "Low Stock Report"; }
-        else if (filter === "alert") { rows = [...negative, ...lowStock]; title = "Stock Alert Report"; }
+        if (filter === "negative") { listed = negative; title = "Negative Stock Report"; }
+        else if (filter === "low") { listed = lowStock; title = "Low Stock Report"; }
+        else if (filter === "alert") { listed = [...negative, ...lowStock]; title = "Stock Alert Report"; }
 
-        const meta: Record<string, string | number> = {
-            "Total Products": rows.length,
-            "Negative Stock": negative.length,
-            "Low Stock": lowStock.length,
-            "Normal Stock": normal.length,
-            "Generated": fmtDate(new Date()),
-        };
-
-        if (categoryId) {
-            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
-            if (cat) meta["Category"] = cat.name;
-        }
-        if (brandId) {
-            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
-            if (br) meta["Brand"] = br.name;
-        }
-
-        const stockQr = await generateQRBuffer(`${title} | Products: ${rows.length} | Negative: ${negative.length} | Low: ${lowStock.length}`);
-        const pdfGen = createPDFGenerator(pdfConfig(
+        const report = createReport({
             title,
-            "Inventory Stock Levels",
-            meta,
-            "landscape",
-            undefined,
-            stockQr
-        ));
-        const doc = pdfGen.getDocument();
-
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: ["auto", "*", "*", 60, 60, 70, 80, 80],
-            rowStyles: (row: number) => {
-                if (row === 0) return { backgroundColor: "#1e293b", textColor: "#ffffff", fontSize: 9, fontStyle: "bold" };
-                const p = rows[row - 1];
-                if (!p) return {};
-                if (p.totalStock < 0) return { backgroundColor: "#fee2e2" };
-                if (p.totalStock <= p.reorderLevel) return { backgroundColor: "#fef9c3" };
-                return {};
+            subtitle: "Inventory stock levels",
+            filename: `stock-report-${filter}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            orientation: "landscape",
+            filters: {
+                ...(await resolveScope(categoryId, brandId)),
+                Listed: listed.length,
+                "As of": fmtDate(new Date()),
             },
         });
 
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Product Name", align: { x: "left", y: "center" } },
-            { text: "Category", align: { x: "left", y: "center" } },
-            { text: "Barcode", align: { x: "center", y: "center" } },
-            { text: "Stock", align: { x: "center", y: "center" } },
-            { text: "Reorder Lvl", align: { x: "center", y: "center" } },
-            { text: "Avg Cost", align: { x: "right", y: "center" } },
-            { text: "Status", align: { x: "center", y: "center" } },
+        report.stats([
+            { label: "Listed Products", value: String(listed.length), tone: "primary" },
+            { label: "Negative Stock", value: String(negative.length), tone: negative.length ? "danger" : "muted" },
+            { label: "Low Stock", value: String(lowStock.length), tone: lowStock.length ? "warning" : "muted" },
+            { label: "Healthy Stock", value: String(normal.length), tone: "success" },
         ]);
 
-        rows.forEach((p, i) => {
-            const defaultVariant = p.variants.find(v => v.isDefault) ?? p.variants[0];
-            const status = p.totalStock < 0 ? "⚠ NEGATIVE" : p.totalStock <= p.reorderLevel ? "⚡ LOW" : "✓ OK";
-            table.row([
-                { text: String(i + 1), align: { x: "center", y: "center" } },
-                { text: p.name, align: { x: "left", y: "center" } },
-                { text: p.category.name, align: { x: "left", y: "center" } },
-                { text: defaultVariant?.barcode ?? "—", align: { x: "center", y: "center" } },
-                { text: String(p.totalStock), align: { x: "center", y: "center" } },
-                { text: String(p.reorderLevel), align: { x: "center", y: "center" } },
-                { text: fmtCurrency(safeAvgCost(p.avgCostPrice, defaultVariant?.price ?? 0)), align: { x: "right", y: "center" } },
-                { text: status, align: { x: "center", y: "center" } },
-            ]);
-        });
-        table.end();
+        report.section("Stock Levels", `${listed.length} record(s)`);
 
-        await pdfGen.sendToResponse(res, `stock-report-${filter}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        if (listed.length === 0) {
+            report.note("No products matched this stock filter.");
+        } else {
+            const rowTones: (Tone | undefined)[] = [];
+            const rows: TableCell[][] = listed.map((p, i) => {
+                const defaultVariant = p.variants.find(v => v.isDefault) ?? p.variants[0];
+                const isNegative = p.totalStock < 0;
+                const isLow = !isNegative && p.totalStock <= p.reorderLevel;
+                rowTones.push(isNegative ? "danger" : isLow ? "warning" : undefined);
+
+                return [
+                    String(i + 1),
+                    p.name,
+                    p.category.name,
+                    defaultVariant?.barcode ?? "—",
+                    String(p.totalStock),
+                    String(p.reorderLevel),
+                    fmtCurrency(safeAvgCost(p.avgCostPrice, defaultVariant?.price ?? 0)),
+                    {
+                        text: isNegative ? "NEGATIVE" : isLow ? "LOW" : "OK",
+                        align: "center" as const,
+                        bold: isNegative || isLow,
+                        tone: isNegative ? ("danger" as const) : isLow ? ("warning" as const) : ("success" as const),
+                    },
+                ];
+            });
+
+            report.table({
+                columns: [
+                    { label: "#", width: 26, align: "center" },
+                    { label: "Product Name", width: "*" },
+                    { label: "Category", width: 120 },
+                    { label: "Barcode", width: 100, align: "center" },
+                    { label: "Stock", width: 60, align: "center" },
+                    { label: "Reorder", width: 66, align: "center" },
+                    { label: "Avg Cost", width: 78, align: "right" },
+                    { label: "Status", width: 82, align: "center" },
+                ],
+                rows,
+                rowTones,
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Stock report PDF error:", error);
         res.status(500).json({ error: "Failed to generate stock report PDF" });
@@ -301,11 +291,9 @@ export const getCostAboveSalePriceReportPDF = async (req: Request, res: Response
 
         interface LossRow {
             sno: number;
-            productName: string;
             variantName: string;
             barcode: string;
             category: string;
-            brand: string;
             unitCost: number;
             sellingPrice: number;
             lossPerUnit: number;
@@ -330,11 +318,9 @@ export const getCostAboveSalePriceReportPDF = async (req: Request, res: Response
 
                     lossRows.push({
                         sno: lossRows.length + 1,
-                        productName: p.name,
                         variantName: v.isDefault ? p.name : `${p.name} (${v.name})`,
                         barcode: v.barcode ?? "—",
                         category: p.category.name,
-                        brand: p.brand?.name ?? "N/A",
                         unitCost,
                         sellingPrice,
                         lossPerUnit,
@@ -345,100 +331,69 @@ export const getCostAboveSalePriceReportPDF = async (req: Request, res: Response
             }
         }
 
-        const meta: Record<string, string | number> = {
-            "Loss-Making Items": lossRows.length,
-            "Total Potential Loss": fmtCurrency(totalPotentialLoss),
-            "Generated": fmtDate(new Date()),
-        };
+        const impactedStock = lossRows.reduce((s, r) => s + Math.max(0, r.stock), 0);
 
-        if (categoryId) {
-            const cat = await prisma.category.findUnique({ where: { id: categoryId }, select: { name: true } });
-            if (cat) meta["Category"] = cat.name;
-        }
-        if (brandId) {
-            const br = await prisma.brand.findUnique({ where: { id: brandId }, select: { name: true } });
-            if (br) meta["Brand"] = br.name;
-        }
-
-        const qr = await generateQRBuffer(`Cost > Sale Price Report | Items: ${lossRows.length} | Potential Loss: ${fmtCurrency(totalPotentialLoss)}`);
-        const pdfGen = createPDFGenerator(pdfConfig(
-            "Cost > Sale Price Report",
-            "Products & Variants where Cost Price exceeds Sale Price",
-            meta,
-            "landscape",
-            "A4",
-            qr
-        ));
-        const doc = pdfGen.getDocument();
-
-        // Summary table
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#fee2e2", fontSize: 10, fontStyle: "bold", textColor: "#991b1b" } : {},
-        });
-        summaryTable.row([
-            { text: "Loss-Making Items", align: { x: "left", y: "center" } },
-            { text: "Total Stock Impacted", align: { x: "left", y: "center" } },
-            { text: "Total Potential Inventory Loss", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: lossRows.length.toString(), align: { x: "left", y: "center" } },
-            { text: lossRows.reduce((s, r) => s + Math.max(0, r.stock), 0).toString(), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalPotentialLoss), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
-
-        pdfGen.moveDown(0.5);
-
-        // Details table
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, "*", 90, 80, 50, 70, 70, 70, 85],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#1e293b", textColor: "#ffffff", fontSize: 9, fontStyle: "bold" } : { backgroundColor: row % 2 === 0 ? "#fef2f2" : "#ffffff" },
+        const report = createReport({
+            title: "Cost Above Sale Price",
+            subtitle: "Items priced below their average cost",
+            filename: reportFilename("cost-above-sale-price-report"),
+            orientation: "landscape",
+            filters: {
+                ...(await resolveScope(categoryId, brandId)),
+                "Loss-Making Items": lossRows.length,
+                "As of": fmtDate(new Date()),
+            },
         });
 
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Product / Variant", align: { x: "left", y: "center" } },
-            { text: "Category", align: { x: "left", y: "center" } },
-            { text: "Barcode", align: { x: "center", y: "center" } },
-            { text: "Stock", align: { x: "center", y: "center" } },
-            { text: "Unit Cost", align: { x: "right", y: "center" } },
-            { text: "Sale Price", align: { x: "right", y: "center" } },
-            { text: "Loss/Unit", align: { x: "right", y: "center" } },
-            { text: "Pot. Loss", align: { x: "right", y: "center" } },
+        report.stats([
+            { label: "Loss-Making Items", value: String(lossRows.length), tone: lossRows.length ? "danger" : "success" },
+            { label: "Stock Impacted", value: fmtCurrency(impactedStock), tone: "warning" },
+            {
+                label: "Potential Loss",
+                value: fmtCurrency(totalPotentialLoss),
+                tone: "danger",
+                note: "if sold at current price",
+            },
         ]);
+
+        report.section("Affected Products", `${lossRows.length} variant(s)`);
 
         if (lossRows.length === 0) {
-            table.row([
-                { text: "No products found with Cost > Sale Price.", colSpan: 9, align: { x: "center", y: "center" } }
-            ]);
+            report.note("No products are currently priced below their average cost. Nothing to act on.");
         } else {
-            lossRows.forEach((r) => {
-                table.row([
-                    { text: String(r.sno), align: { x: "center", y: "center" } },
-                    { text: r.variantName, align: { x: "left", y: "center" } },
-                    { text: r.category, align: { x: "left", y: "center" } },
-                    { text: r.barcode, align: { x: "center", y: "center" } },
-                    { text: String(r.stock), align: { x: "center", y: "center" } },
-                    { text: fmtCurrency(r.unitCost), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(r.sellingPrice), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(r.lossPerUnit), align: { x: "right", y: "center" } },
-                    { text: fmtCurrency(r.potentialLoss), align: { x: "right", y: "center" } },
-                ]);
-            });
-
-            doc.fontSize(9);
-            table.row([
-                { text: "Total Potential Loss", colSpan: 8, align: { x: "justify", y: "center" } },
-                { text: fmtCurrency(totalPotentialLoss), align: { x: "right", y: "center" } },
+            const rows: TableCell[][] = lossRows.map((r) => [
+                String(r.sno),
+                r.variantName,
+                r.category,
+                r.barcode,
+                String(r.stock),
+                fmtCurrency(r.unitCost),
+                fmtCurrency(r.sellingPrice),
+                { text: fmtCurrency(r.lossPerUnit), align: "right" as const, tone: "danger" as const },
+                { text: fmtCurrency(r.potentialLoss), align: "right" as const, tone: "danger" as const },
             ]);
+
+            report.table({
+                columns: [
+                    { label: "#", width: 26, align: "center" },
+                    { label: "Product / Variant", width: "*" },
+                    { label: "Category", width: 96 },
+                    { label: "Barcode", width: 92, align: "center" },
+                    { label: "Stock", width: 54, align: "center" },
+                    { label: "Unit Cost", width: 76, align: "right" },
+                    { label: "Sale Price", width: 76, align: "right" },
+                    { label: "Loss / Unit", width: 76, align: "right" },
+                    { label: "Potential Loss", width: 88, align: "right" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Total Potential Loss", colSpan: 8 },
+                    fmtCurrency(totalPotentialLoss),
+                ],
+            });
         }
 
-        table.end();
-
-        await pdfGen.sendToResponse(res, `cost-above-sale-price-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+        await sendReport(res, report);
     } catch (error) {
         console.error("Cost > Sale Price report PDF error:", error);
         res.status(500).json({ error: "Failed to generate Cost > Sale Price report PDF" });

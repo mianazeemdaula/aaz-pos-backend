@@ -4,6 +4,7 @@ import { migrateDatabase } from "./prisma/migrate";
 import { prisma } from "./prisma/prisma";
 import { checkForUpdates } from "./utils/auto-updater";
 import { initializeCompanySettings } from "./controllers/settings.controller";
+import { warmUpPdfWorkers, shutdownPdfWorkers } from "./utils/pdf";
 // https://o.fbr.gov.pk/newcu/tariff/ByDescriptionSearch.asp
 const PORT = process.env.PORT || 4001;
 
@@ -50,10 +51,22 @@ async function bootstrap() {
   // Initialize and cache company settings
   await initializeCompanySettings();
 
-  app.listen(PORT, () => {
+  // Spin up a report-rendering thread now so the first PDF of the day does
+  // not pay the module-load and font-parse cost. The pool retires idle
+  // threads on its own.
+  warmUpPdfWorkers();
+
+  const server = app.listen(PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  const shutdown = () => {
+    server.close();
+    void shutdownPdfWorkers();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
 
 void bootstrap();

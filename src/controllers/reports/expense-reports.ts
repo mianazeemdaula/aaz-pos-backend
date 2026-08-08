@@ -1,13 +1,7 @@
 import { Request, Response } from "express";
-import dayjs from "dayjs";
 import { prisma } from "../../prisma/prisma";
-import {
-    fmtDate,
-    fmtCurrency,
-    pdfConfig,
-    generateQRBuffer,
-    createPDFGenerator
-} from "./helpers";
+import { fmtDate, fmtCurrency, createReport, reportFilename, sendReport } from "./helpers";
+import type { StatItem, TableCell } from "../../utils/pdf/report-spec";
 
 export const getExpensesReportPDF = async (req: Request, res: Response): Promise<void> => {
     const { from, to } = req.query;
@@ -27,74 +21,76 @@ export const getExpensesReportPDF = async (req: Request, res: Response): Promise
         for (const e of expenses) {
             byCategory[e.category] = (byCategory[e.category] ?? 0) + e.amount;
         }
+        const categories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
 
-        const rows = expenses.map((e, i) => ({
-            sno: i + 1,
-            date: e.date,
-            description: e.description,
-            category: e.category,
-            account: e.account.name,
-            amount: e.amount,
-        }));
+        const report = createReport({
+            title: "Expenses Report",
+            subtitle: "Expense transactions and category split",
+            filename: reportFilename("expenses-report"),
+            filters: {
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Records: expenses.length,
+            },
+        });
 
-        const expQr = await generateQRBuffer(`Expenses Report | ${from ? fmtDate(from as string) : "All"} - ${to ? fmtDate(to as string) : "Now"} | Records: ${expenses.length}`);
-        const pdfGen = createPDFGenerator(
-            pdfConfig("Expenses Report", "Expense Transactions", {
-                "From": from ? fmtDate(from as string) : "All Time",
-                "To": to ? fmtDate(to as string) : "Now",
-                "Total Records": expenses.length,
-            }, undefined, undefined, expQr)
-        );
-        const doc = pdfGen.getDocument();
+        report.stats([
+            { label: "Total Expenses", value: fmtCurrency(totalAmount), tone: "danger", note: `${expenses.length} entries` },
+            { label: "Categories", value: String(categories.length) },
+            {
+                label: "Average / Entry",
+                value: fmtCurrency(expenses.length ? Math.round(totalAmount / expenses.length) : 0),
+                tone: "muted",
+            },
+            {
+                label: "Largest Category",
+                value: categories.length ? categories[0][0] : "—",
+                note: categories.length ? fmtCurrency(categories[0][1]) : undefined,
+                tone: "warning",
+            },
+        ]);
 
-        // Category breakdown summary
-        const catEntries = [["Total Expenses", fmtCurrency(totalAmount)], ...Object.entries(byCategory).map(([c, v]) => [c, fmtCurrency(v)])];
-        const catCols = Math.min(catEntries.length, 4);
-        const catColStyles: ("*" | number)[] = Array(catCols).fill("*");
-        doc.x = doc.page.margins.left;
-        const catTable = doc.table({ columnStyles: catColStyles });
-        for (let i = 0; i < catEntries.length; i += catCols) {
-            const chunk = catEntries.slice(i, i + catCols);
-            while (chunk.length < catCols) chunk.push(["", ""]);
-            catTable.row(chunk.map(([label]) => ({ text: label, align: { x: "left" as const, y: "center" as const } })));
-            catTable.row(chunk.map(([, value]) => ({ text: value, align: { x: "left" as const, y: "center" as const } })));
+        if (categories.length) {
+            report.section("Spend by Category", "Share of total expenditure");
+            report.stats(
+                categories.map<StatItem>(([name, amount]) => ({
+                    label: name,
+                    value: fmtCurrency(amount),
+                    note: totalAmount ? `${((amount / totalAmount) * 100).toFixed(1)}% of total` : undefined,
+                    tone: "warning",
+                }))
+            );
         }
-        catTable.end();
 
-        pdfGen.moveDown(0.5);
+        report.section("Expense Entries", `${expenses.length} record(s)`);
 
-        // Expenses table — 6 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, 80, "*", 90, 90, 90],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Description", align: { x: "left", y: "center" } },
-            { text: "Category", align: { x: "left", y: "center" } },
-            { text: "Account", align: { x: "left", y: "center" } },
-            { text: "Amount", align: { x: "right", y: "center" } },
-        ]);
-        rows.forEach((row) => {
-            table.row([
-                { text: String(row.sno), align: { x: "center", y: "center" } },
-                { text: fmtDate(row.date, "DD-MM-YYYY"), align: { x: "center", y: "center" } },
-                { text: row.description, align: { x: "left", y: "center" } },
-                { text: row.category, align: { x: "left", y: "center" } },
-                { text: row.account, align: { x: "left", y: "center" } },
-                { text: fmtCurrency(row.amount), align: { x: "right", y: "center" } },
+        if (expenses.length === 0) {
+            report.note("No expenses were recorded for the selected period.");
+        } else {
+            const rows: TableCell[][] = expenses.map((e, i) => [
+                String(i + 1),
+                fmtDate(e.date, "DD-MM-YYYY"),
+                e.description,
+                e.category,
+                e.account.name,
+                fmtCurrency(e.amount),
             ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalAmount), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
 
-        await pdfGen.sendToResponse(res, `expenses-report-${dayjs().format("YYYY-MM-DD")}.pdf`);
+            report.table({
+                columns: [
+                    { label: "#", width: 28, align: "center" },
+                    { label: "Date", width: 74, align: "center" },
+                    { label: "Description", width: "*" },
+                    { label: "Category", width: 92 },
+                    { label: "Account", width: 92 },
+                    { label: "Amount", width: 84, align: "right" },
+                ],
+                rows,
+                totalRow: [{ text: "Grand Total", colSpan: 5 }, fmtCurrency(totalAmount)],
+            });
+        }
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Expenses report PDF error:", error);
         res.status(500).json({ error: "Failed to generate expenses report PDF", message: error instanceof Error ? error.message : "Unknown error" });

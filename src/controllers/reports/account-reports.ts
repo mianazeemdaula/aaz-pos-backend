@@ -1,16 +1,8 @@
 import { Request, Response } from "express";
 import dayjs from "dayjs";
 import { prisma } from "../../prisma/prisma";
-import { generateSignatureSection } from "../../utils/pdf/pdfkit-components";
-import {
-    fmtDate,
-    fmtCurrency,
-    pdfConfig,
-    createPDFGenerator,
-    fonts,
-    logoPath,
-    readSettings
-} from "./helpers";
+import { fmtDate, fmtCurrency, createReport, sendReport } from "./helpers";
+import type { TableCell } from "../../utils/pdf/report-spec";
 
 export const getAccountStatementPDF = async (req: Request, res: Response): Promise<void> => {
     const accountId = Number(req.params.accountId);
@@ -228,115 +220,76 @@ export const getAccountStatementPDF = async (req: Request, res: Response): Promi
         const totalCredit = entries.reduce((s, e) => s + e.credit, 0);
         const netBalance = (account.openingBalance ?? 0) + totalDebit - totalCredit;
 
-        // PDF
-        const reportFonts = fonts();
-        const company = readSettings();
-        const pdfGen = createPDFGenerator({
-            fontRegistrations: reportFonts.registrations,
-            fontFamilyMap: reportFonts.aliasMap,
-            pdfOptions: {
-                size: "A4",
-                orientation: "landscape",
-                margins: { top: 10, bottom: 10, left: 20, right: 20 },
-            },
-            header: {
-                title: "Account Statement",
-                subtitle: `${account.code} — ${account.name} (${account.type})`,
-                logo: { path: logoPath, width: 60, height: 60 },
-                companyName: (company.businessName as string) || undefined,
-                address: (company.address as string) || undefined,
-                phone: (company.phone as string) || undefined,
-                showDate: true,
-                titleFont: { family: "Helvetica-Bold" as const, size: 16 },
-                subtitleFont: { size: 10, color: "#666666" },
-                filterInfo: {
-                    "Account": `${account.code} / ${account.name}`,
-                    "Type": account.type,
-                    "From": from ? fmtDate(from as string) : "All Time",
-                    "To": to ? fmtDate(to as string) : "Now",
-                    "Entries": entries.length,
-                },
-            },
-            footer: {
-                leftText: (company.businessName as string) || "POS System",
-                centerText: "Account Statement",
-                showPageNumber: true,
-                font: { size: 8, color: "#666666" },
-            },
-        });
-
-        const doc = pdfGen.getDocument();
-
-        // Summary bar
-        doc.x = doc.page.margins.left;
-        const summaryTable = doc.table({
-            columnStyles: ["*", "*", "*", "*"],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        summaryTable.row([
-            { text: "Total Debit (IN)", align: { x: "left", y: "center" } },
-            { text: "Total Credit (OUT)", align: { x: "left", y: "center" } },
-            { text: "Net Balance", align: { x: "left", y: "center" } },
-            { text: "Transactions", align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.row([
-            { text: fmtCurrency(totalDebit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "left", y: "center" } },
-            { text: fmtCurrency(netBalance), align: { x: "left", y: "center" } },
-            { text: entries.length.toString(), align: { x: "left", y: "center" } },
-        ]);
-        summaryTable.end();
-        pdfGen.moveDown(0.5);
-
-        // Ledger table — 7 columns
-        doc.x = doc.page.margins.left;
-        const table = doc.table({
-            columnStyles: [30, 80, 110, "*", 110, 90, 90],
-            rowStyles: (row: number) => row === 0 ? { backgroundColor: "#f0f0f0", fontSize: 10, fontStyle: "bold" } : {},
-        });
-        table.row([
-            { text: "#", align: { x: "center", y: "center" } },
-            { text: "Date", align: { x: "center", y: "center" } },
-            { text: "Type", align: { x: "left", y: "center" } },
-            { text: "Description / Reference", align: { x: "left", y: "center" } },
-            { text: "Reference", align: { x: "center", y: "center" } },
-            { text: "Debit (IN)", align: { x: "right", y: "center" } },
-            { text: "Credit (OUT)", align: { x: "right", y: "center" } },
-        ]);
-        entries.forEach((entry, i) => {
-            table.row([
-                { text: String(i + 1), align: { x: "center", y: "center" } },
-                { text: fmtDate(entry.date, "DD-MM-YYYY hh:mm A"), align: { x: "center", y: "center" } },
-                { text: entry.type, align: { x: "left", y: "center" } },
-                { text: entry.description, align: { x: "left", y: "center" } },
-                { text: entry.reference, align: { x: "center", y: "center" } },
-                { text: entry.debit ? fmtCurrency(entry.debit) : "-", align: { x: "right", y: "center" } },
-                { text: entry.credit ? fmtCurrency(entry.credit) : "-", align: { x: "right", y: "center" } },
-            ]);
-        });
-        doc.fontSize(9);
-        table.row([
-            { text: "Grand Total", colSpan: 5, align: { x: "justify", y: "center" } },
-            { text: fmtCurrency(totalDebit), align: { x: "right", y: "center" } },
-            { text: fmtCurrency(totalCredit), align: { x: "right", y: "center" } },
-        ]);
-        table.end();
-
-        pdfGen.moveDown(1);
-        generateSignatureSection(doc, {
-            signatures: [
-                { label: "Prepared By", name: "_________________", title: "Accountant" },
-                { label: "Reviewed By", name: "_________________", title: "Finance Manager" },
-                { label: "Approved By", name: "_________________", title: "General Manager" },
-            ],
-            spacing: 30,
-            lineWidth: 120,
-            labelFont: { family: "Helvetica-Bold", size: 8 },
-            nameFont: { size: 9 },
-        });
-
+        const openingBalance = account.openingBalance ?? 0;
         const safeName = account.name.replace(/[^a-zA-Z0-9_-]/g, "_");
-        await pdfGen.sendToResponse(res, `account-statement-${safeName}-${dayjs().format("YYYY-MM-DD")}.pdf`);
+
+        const report = createReport({
+            title: "Account Statement",
+            subtitle: `${account.code} — ${account.name} (${account.type})`,
+            filename: `account-statement-${safeName}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            orientation: "landscape",
+            filters: {
+                Account: `${account.code} / ${account.name}`,
+                Type: account.type,
+                From: from ? fmtDate(from as string) : "All Time",
+                To: to ? fmtDate(to as string) : "Now",
+                Entries: entries.length,
+            },
+        });
+
+        report.stats([
+            { label: "Opening Balance", value: fmtCurrency(openingBalance), tone: "muted" },
+            { label: "Total Debit (In)", value: fmtCurrency(totalDebit), tone: "success" },
+            { label: "Total Credit (Out)", value: fmtCurrency(totalCredit), tone: "danger" },
+            {
+                label: "Closing Balance",
+                value: fmtCurrency(netBalance),
+                tone: netBalance < 0 ? "danger" : "primary",
+                note: `${entries.length} transactions`,
+            },
+        ]);
+
+        report.section("Ledger", `${entries.length} transaction(s), oldest first`);
+
+        if (entries.length === 0) {
+            report.note("No transactions were recorded on this account for the selected period.");
+        } else {
+            const rows: TableCell[][] = entries.map((entry, i) => [
+                String(i + 1),
+                fmtDate(entry.date, "DD-MM-YYYY hh:mm A"),
+                entry.type,
+                entry.description,
+                entry.reference,
+                entry.debit ? { text: fmtCurrency(entry.debit), align: "right" as const, tone: "success" as const } : "-",
+                entry.credit ? { text: fmtCurrency(entry.credit), align: "right" as const, tone: "danger" as const } : "-",
+            ]);
+
+            report.table({
+                columns: [
+                    { label: "#", width: 26, align: "center" },
+                    { label: "Date", width: 96, align: "center" },
+                    { label: "Type", width: 110 },
+                    { label: "Description", width: "*" },
+                    { label: "Reference", width: 104, align: "center" },
+                    { label: "Debit (In)", width: 86, align: "right" },
+                    { label: "Credit (Out)", width: 86, align: "right" },
+                ],
+                rows,
+                totalRow: [
+                    { text: "Grand Total", colSpan: 5 },
+                    fmtCurrency(totalDebit),
+                    fmtCurrency(totalCredit),
+                ],
+            });
+        }
+
+        report.signatures([
+            { label: "Prepared By", name: "_________________", title: "Accountant" },
+            { label: "Reviewed By", name: "_________________", title: "Finance Manager" },
+            { label: "Approved By", name: "_________________", title: "General Manager" },
+        ]);
+
+        await sendReport(res, report);
     } catch (error) {
         console.error("Account statement PDF error:", error);
         res.status(500).json({ error: "Failed to generate account statement PDF", message: error instanceof Error ? error.message : "Unknown error" });
