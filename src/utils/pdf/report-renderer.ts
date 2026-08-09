@@ -699,19 +699,26 @@ class ReportRenderer {
         if (!block.columns.some((col) => col.wrap)) return base;
 
         let height = base;
-        for (let i = 0; i < block.columns.length; i++) {
-            if (!block.columns[i].wrap) continue;
-            const cell = cellOf(row[i]);
-            if (!cell.text) continue;
-            const span = cell.colSpan && cell.colSpan > 1 ? cell.colSpan : 1;
-            let width = 0;
-            for (let s = 0; s < span && i + s < widths.length; s++) width += widths[i + s];
-            const measured =
-                this.doc
-                    .font(this.fontFor(cell.text, cell.bold))
-                    .fontSize(fontSize)
-                    .heightOfString(cell.text, { width: this.innerWidth(width) }) + 8;
-            if (measured > height) height = measured;
+        let colIdx = 0;
+        let cellIdx = 0;
+        while (colIdx < block.columns.length && cellIdx < row.length) {
+            const col = block.columns[colIdx];
+            const cell = cellOf(row[cellIdx]);
+            const span = Math.max(1, Math.min(cell.colSpan || 1, block.columns.length - colIdx));
+
+            if (col.wrap && cell.text) {
+                let width = 0;
+                for (let s = 0; s < span && colIdx + s < widths.length; s++) width += widths[colIdx + s];
+                const measured =
+                    this.doc
+                        .font(this.fontFor(cell.text, cell.bold))
+                        .fontSize(fontSize)
+                        .heightOfString(cell.text, { width: this.innerWidth(width) }) + 8;
+                if (measured > height) height = measured;
+            }
+
+            colIdx += span;
+            cellIdx++;
         }
         return Math.min(height, MAX_ROW_HEIGHT);
     }
@@ -729,14 +736,15 @@ class ReportRenderer {
         }
 
         let x = this.x0;
-        let i = 0;
-        while (i < block.columns.length) {
-            const col = block.columns[i];
-            const cell = cellOf(row[i]);
-            const span = Math.max(1, Math.min(cell.colSpan || 1, block.columns.length - i));
+        let colIdx = 0;
+        let cellIdx = 0;
+        while (colIdx < block.columns.length && cellIdx < row.length) {
+            const col = block.columns[colIdx];
+            const cell = cellOf(row[cellIdx]);
+            const span = Math.max(1, Math.min(cell.colSpan || 1, block.columns.length - colIdx));
 
             let width = 0;
-            for (let s = 0; s < span; s++) width += widths[i + s];
+            for (let s = 0; s < span; s++) width += widths[colIdx + s];
 
             if (cell.text) {
                 const bold = cell.bold ?? options.bold;
@@ -758,7 +766,8 @@ class ReportRenderer {
             }
 
             x += width;
-            i += span;
+            colIdx += span;
+            cellIdx++;
         }
 
         this.y += height;

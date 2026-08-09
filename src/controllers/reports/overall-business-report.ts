@@ -319,8 +319,14 @@ export const getOverallPayablesReceivablesReportPDF = async (req: Request, res: 
             .sort((a, b) => b.balance - a.balance);
 
         const totalReceivable = customers.filter(c => c.balance > 0).reduce((s, c) => s + c.balance, 0);
-        const totalPayable = suppliers.filter(s => s.balance > 0).reduce((s, s1) => s + s1.balance, 0);
-        const netWorkingPosition = totalReceivable - totalPayable;
+        const totalCustomerOverpaid = customers.filter(c => c.balance < 0).reduce((s, c) => s + Math.abs(c.balance), 0);
+        const netCustomerReceivable = totalReceivable - totalCustomerOverpaid;
+
+        const totalPayable = suppliers.filter(s => s.balance > 0).reduce((acc, s) => acc + s.balance, 0);
+        const totalSupplierOverpaid = suppliers.filter(s => s.balance < 0).reduce((acc, s) => acc + Math.abs(s.balance), 0);
+        const netSupplierPayable = totalPayable - totalSupplierOverpaid;
+
+        const netWorkingPosition = netCustomerReceivable - netSupplierPayable;
 
         const dueCustomers = customers.filter(c => c.balance > 0).length;
         const dueSuppliers = suppliers.filter(s => s.balance > 0).length;
@@ -372,8 +378,8 @@ export const getOverallPayablesReceivablesReportPDF = async (req: Request, res: 
                     { text: c.balance > 0 ? "RECEIVABLE" : "PREPAID", align: "center", tone: c.balance > 0 ? "warning" : "muted" },
                 ]) as TableCell[][],
                 totalRow: [
-                    { text: "Total Receivable", colSpan: 4 },
-                    fmtCurrency(totalReceivable),
+                    { text: totalCustomerOverpaid > 0 ? "Net Customer Receivables" : "Total Customer Receivables", colSpan: 4 },
+                    fmtCurrency(netCustomerReceivable),
                     "",
                 ],
             });
@@ -401,12 +407,57 @@ export const getOverallPayablesReceivablesReportPDF = async (req: Request, res: 
                     { text: sup.balance > 0 ? "PAYABLE" : "ADVANCE PAID", align: "center", tone: sup.balance > 0 ? "danger" : "muted" },
                 ]) as TableCell[][],
                 totalRow: [
-                    { text: "Total Payable", colSpan: 4 },
-                    fmtCurrency(totalPayable),
+                    { text: totalSupplierOverpaid > 0 ? "Net Supplier Payables" : "Total Supplier Payables", colSpan: 4 },
+                    fmtCurrency(netSupplierPayable),
                     "",
                 ],
             });
         }
+
+        report.section("Payables & Receivables Summary", "Combined total position of all payables and receivables");
+        report.table({
+            columns: [
+                { label: "Category", width: "*" },
+                { label: "Parties Count", width: 90, align: "center" },
+                { label: "Receivables (Rs)", width: 120, align: "right" },
+                { label: "Payables (Rs)", width: 120, align: "right" },
+                { label: "Net Total (Rs)", width: 130, align: "right" },
+            ],
+            rows: [
+                [
+                    "Total Customer Receivables",
+                    String(dueCustomers),
+                    fmtCurrency(totalReceivable),
+                    "-",
+                    { text: fmtCurrency(totalReceivable), align: "right", tone: "warning" },
+                ],
+                [
+                    "Total Supplier Payables",
+                    String(dueSuppliers),
+                    "-",
+                    fmtCurrency(totalPayable),
+                    { text: `-${fmtCurrency(totalPayable)}`, align: "right", tone: "danger" },
+                ],
+                ...(totalCustomerOverpaid > 0 ? [[
+                    "Customer Prepayments (Overpaid)",
+                    String(customers.filter(c => c.balance < 0).length),
+                    "-",
+                    fmtCurrency(totalCustomerOverpaid),
+                    { text: `-${fmtCurrency(totalCustomerOverpaid)}`, align: "right", tone: "muted" },
+                ]] : []),
+                ...(totalSupplierOverpaid > 0 ? [[
+                    "Supplier Advances Paid",
+                    String(suppliers.filter(s => s.balance < 0).length),
+                    fmtCurrency(totalSupplierOverpaid),
+                    "-",
+                    { text: fmtCurrency(totalSupplierOverpaid), align: "right", tone: "muted" },
+                ]] : []),
+            ] as TableCell[][],
+            totalRow: [
+                { text: "GRAND TOTAL (ALL PAYABLES & RECEIVABLES)", colSpan: 4 },
+                { text: fmtCurrency(netWorkingPosition), align: "right", tone: netWorkingPosition >= 0 ? "success" : "danger" },
+            ],
+        });
 
         await sendReport(res, report);
     } catch (err) {
