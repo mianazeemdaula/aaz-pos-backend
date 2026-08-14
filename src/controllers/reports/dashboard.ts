@@ -1,7 +1,99 @@
 import { Request, Response } from "express";
 import dayjs from "dayjs";
+import { Prisma } from "../../generated/client/client";
 import { prisma } from "../../prisma/prisma";
-import { safeAvgCost } from "./helpers";
+
+type BucketRow = { bucket: Date; sales: number; salesCount: number; purchases: number; expenses: number };
+type ItemAggRow = { cogs: number; itemDiscounts: number };
+type InventoryRow = {
+    totalProducts: number;
+    lowStockCount: number;
+    outOfStockCount: number;
+    totalInventoryValue: number;
+};
+
+/**
+ * Sales, purchases and expenses bucketed by day or month in one round trip.
+ *
+ * The timestamps are stored without a zone and were previously bucketed in JS
+ * with dayjs, which formats in the server's local zone. Shifting by the same
+ * offset here keeps the chart buckets identical to what the screen showed
+ * before.
+ */
+function bucketQuery(since: Date, grain: "day" | "month", tzOffsetMinutes: number) {
+    const shift = Prisma.sql`make_interval(mins => ${tzOffsetMinutes})`;
+    // Group on the truncated timestamp rather than on a formatted string:
+    // date_trunc is measurably cheaper than to_char over ~38k rows, and the
+    // caller only has to format 12 (or 7) results instead of every row.
+    return prisma.$queryRaw<BucketRow[]>`
+        select bucket,
+               sum(sales)::float8            as "sales",
+               sum("salesCount")::int        as "salesCount",
+               sum(purchases)::float8        as "purchases",
+               sum(expenses)::float8         as "expenses"
+        from (
+            select date_trunc(${grain}, "createdAt" + ${shift})               as bucket,
+                   coalesce(sum("totalAmount"), 0)                            as sales,
+                   count(*) filter (where "totalAmount" >= 0)                 as "salesCount",
+                   0                                                          as purchases,
+                   0                                                          as expenses
+            from sales where "createdAt" >= ${since} group by 1
+            union all
+            select date_trunc(${grain}, date + ${shift}), 0, 0,
+                   coalesce(sum("totalAmount"), 0), 0
+            from purchases where date >= ${since} group by 1
+            union all
+            select date_trunc(${grain}, date + ${shift}), 0, 0, 0,
+                   coalesce(sum(amount), 0)
+            from expenses where date >= ${since} group by 1
+        ) t
+        group by bucket`;
+}
+
+/**
+ * Render a bucket timestamp as the chart's key.
+ *
+ * The shift to local wall-clock already happened in SQL, so these must be
+ * formatted in UTC — running them back through a local-time formatter would
+ * apply the offset twice.
+ */
+function bucketKey(bucket: Date, grain: "day" | "month"): string {
+    const iso = new Date(bucket).toISOString();
+    return grain === "month" ? iso.slice(0, 7) : iso.slice(0, 10);
+}
+
+/** COGS and item-level discount for every sale on or after `since`. */
+function saleItemAgg(since: Date) {
+    return prisma.$queryRaw<ItemAggRow[]>`
+        select coalesce(sum(si.quantity * si."avgCostPrice"), 0)::float8 as "cogs",
+               coalesce(sum(si.discount * si.quantity), 0)::float8       as "itemDiscounts"
+        from sale_items si
+        join sales s on s.id = si."saleId"
+        where s."createdAt" >= ${since}`;
+}
+
+/**
+ * Inventory tiles. The CASE mirrors safeAvgCost(): trust avgCostPrice when it
+ * is a sane positive number, otherwise fall back to 95% of the first variant's
+ * price. NaN and Infinity both fail the range test, as they did in JS.
+ */
+function inventoryQuery() {
+    return prisma.$queryRaw<InventoryRow[]>`
+        select count(*)::int                                                          as "totalProducts",
+               count(*) filter (where p."totalStock" > 0
+                                  and p."totalStock" <= p."reorderLevel")::int        as "lowStockCount",
+               count(*) filter (where p."totalStock" <= 0)::int                       as "outOfStockCount",
+               coalesce(sum(p."totalStock" * case
+                   when p."avgCostPrice" > 0 and p."avgCostPrice" < 1e9 then p."avgCostPrice"
+                   else greatest(coalesce(fv.price, 0) * 0.95, 0)
+               end), 0)::float8                                                       as "totalInventoryValue"
+        from products p
+        left join lateral (
+            select pv.price from product_variants pv
+            where pv."productId" = p.id order by pv.id asc limit 1
+        ) fv on true
+        where p.active = true`;
+}
 
 export const getDashboardStats = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -14,6 +106,9 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         const endOfLastMonth = now.subtract(1, "month").endOf("month").toDate();
         const startOf7DaysAgo = now.subtract(6, "day").startOf("day").toDate();
         const startOf12MAgo = now.subtract(11, "month").startOf("month").toDate();
+        // Minutes to add to a stored UTC timestamp to get local wall-clock time,
+        // matching how dayjs used to format these dates on this server.
+        const tzOffsetMinutes = -new Date().getTimezoneOffset();
 
         const [
             salesToday, returnsToday,
@@ -23,12 +118,11 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
             salesLastMonth, returnsLastMonth,
             purchasesLastMonth, expensesLastMonth,
             pendingReturns, totalCustomers, totalSuppliers, newCustomersThisMonth,
-            salesLast7Days, purchasesLast7Days, expensesLast7Days,
-            salesLast12M, purchasesLast12M, expensesLast12M,
+            dailyBuckets, monthlyBuckets,
             topVariantsRaw, topCustomersRaw,
             recentSales,
-            monthSaleItems, todaySaleItems,
-            allActiveProducts,
+            monthItemAgg, todayItemAgg,
+            inventoryAgg,
         ] = await Promise.all([
             // Today / Yesterday sales and returns
             prisma.sale.aggregate({ where: { createdAt: { gte: startOfToday }, totalAmount: { gte: 0 } }, _sum: { totalAmount: true, paidAmount: true }, _count: true }),
@@ -50,14 +144,12 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
             prisma.customer.count({ where: { active: true } }),
             prisma.supplier.count({ where: { active: true } }),
             prisma.customer.count({ where: { active: true, createdAt: { gte: startOfThisMonth } } }),
-            // 7-day chart (individual records grouped in JS)
-            prisma.sale.findMany({ where: { createdAt: { gte: startOf7DaysAgo } }, select: { createdAt: true, totalAmount: true } }),
-            prisma.purchase.findMany({ where: { date: { gte: startOf7DaysAgo } }, select: { date: true, totalAmount: true } }),
-            prisma.expense.findMany({ where: { date: { gte: startOf7DaysAgo } }, select: { date: true, amount: true } }),
-            // 12-month chart
-            prisma.sale.findMany({ where: { createdAt: { gte: startOf12MAgo } }, select: { createdAt: true, totalAmount: true } }),
-            prisma.purchase.findMany({ where: { date: { gte: startOf12MAgo } }, select: { date: true, totalAmount: true } }),
-            prisma.expense.findMany({ where: { date: { gte: startOf12MAgo } }, select: { date: true, amount: true } }),
+            // Chart buckets. These used to be six findMany calls that pulled every
+            // row of the window into memory — ~38k sale rows for the 12-month
+            // chart alone — only to bucket them in JS. Postgres does the same
+            // grouping and returns at most 36 rows.
+            bucketQuery(startOf7DaysAgo, "day", tzOffsetMinutes),
+            bucketQuery(startOf12MAgo, "month", tzOffsetMinutes),
             // Top 5 variants this month by revenue
             prisma.saleItem.groupBy({
                 by: ["variantId"],
@@ -81,28 +173,22 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
                 take: 5,
                 select: { id: true, createdAt: true, totalAmount: true, paidAmount: true, customer: { select: { name: true } } },
             }),
-            // Sale items for COGS (month & today)
-            prisma.saleItem.findMany({ where: { sale: { createdAt: { gte: startOfThisMonth } } }, select: { quantity: true, avgCostPrice: true, discount: true } }),
-            prisma.saleItem.findMany({ where: { sale: { createdAt: { gte: startOfToday } } }, select: { quantity: true, avgCostPrice: true, discount: true } }),
-            // All active products for inventory stats
-            prisma.product.findMany({
-                where: { active: true },
-                select: { totalStock: true, reorderLevel: true, avgCostPrice: true, variants: { select: { price: true }, take: 1, orderBy: { id: "asc" } } },
-            }),
+            // COGS and item-level discounts, summed in the database rather than
+            // by pulling every sale_item of the month across the wire.
+            saleItemAgg(startOfThisMonth),
+            saleItemAgg(startOfToday),
+            // Inventory tiles: counts and stock value, aggregated in SQL. This
+            // previously loaded all ~7k active products plus a variant each.
+            inventoryQuery(),
         ]);
 
-        // ── Inventory stats (computed in JS to support per-product reorderLevel)
-        const lowStockCount = allActiveProducts.filter(p => p.totalStock > 0 && p.totalStock <= p.reorderLevel).length;
-        const outOfStockCount = allActiveProducts.filter(p => p.totalStock <= 0).length;
-        const totalProducts = allActiveProducts.length;
-        const totalInventoryValue = allActiveProducts.reduce(
-            (s, p) => s + p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0),
-            0
-        );
+        // ── Inventory stats (aggregated in SQL, see inventoryQuery)
+        const inv = inventoryAgg[0] ?? { totalProducts: 0, lowStockCount: 0, outOfStockCount: 0, totalInventoryValue: 0 };
+        const { totalProducts, lowStockCount, outOfStockCount, totalInventoryValue } = inv;
 
         // ── COGS
-        const todayCOGS = todaySaleItems.reduce((s, item) => s + item.quantity * item.avgCostPrice, 0);
-        const monthCOGS = monthSaleItems.reduce((s, item) => s + item.quantity * item.avgCostPrice, 0);
+        const todayCOGS = todayItemAgg[0]?.cogs ?? 0;
+        const monthCOGS = monthItemAgg[0]?.cogs ?? 0;
 
         // ── Growth helper (% change, 1 decimal)
         const growth = (current: number, previous: number): number => {
@@ -115,22 +201,14 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         for (let i = 6; i >= 0; i--) {
             dailyMap.set(now.subtract(i, "day").format("YYYY-MM-DD"), { sales: 0, salesCount: 0, purchases: 0, expenses: 0 });
         }
-        for (const s of salesLast7Days) {
-            const e = dailyMap.get(dayjs(s.createdAt).format("YYYY-MM-DD"));
+        for (const b of dailyBuckets) {
+            const e = dailyMap.get(bucketKey(b.bucket, "day"));
             if (e) {
-                e.sales += s.totalAmount;
-                if (s.totalAmount >= 0) {
-                    e.salesCount++;
-                }
+                e.sales += b.sales;
+                e.salesCount += b.salesCount;
+                e.purchases += b.purchases;
+                e.expenses += b.expenses;
             }
-        }
-        for (const p of purchasesLast7Days) {
-            const e = dailyMap.get(dayjs(p.date).format("YYYY-MM-DD"));
-            if (e) e.purchases += p.totalAmount;
-        }
-        for (const ex of expensesLast7Days) {
-            const e = dailyMap.get(dayjs(ex.date).format("YYYY-MM-DD"));
-            if (e) e.expenses += ex.amount;
         }
         const dailyChart = Array.from(dailyMap.entries()).map(([date, v]) => ({ date, ...v }));
 
@@ -139,22 +217,14 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         for (let i = 11; i >= 0; i--) {
             monthlyMap.set(now.subtract(i, "month").format("YYYY-MM"), { sales: 0, salesCount: 0, purchases: 0, expenses: 0 });
         }
-        for (const s of salesLast12M) {
-            const e = monthlyMap.get(dayjs(s.createdAt).format("YYYY-MM"));
+        for (const b of monthlyBuckets) {
+            const e = monthlyMap.get(bucketKey(b.bucket, "month"));
             if (e) {
-                e.sales += s.totalAmount;
-                if (s.totalAmount >= 0) {
-                    e.salesCount++;
-                }
+                e.sales += b.sales;
+                e.salesCount += b.salesCount;
+                e.purchases += b.purchases;
+                e.expenses += b.expenses;
             }
-        }
-        for (const p of purchasesLast12M) {
-            const e = monthlyMap.get(dayjs(p.date).format("YYYY-MM"));
-            if (e) e.purchases += p.totalAmount;
-        }
-        for (const ex of expensesLast12M) {
-            const e = monthlyMap.get(dayjs(ex.date).format("YYYY-MM"));
-            if (e) e.expenses += ex.amount;
         }
         const monthlyChart = Array.from(monthlyMap.entries()).map(([month, v]) => ({ month, ...v }));
 
@@ -201,7 +271,7 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
         const todayPaidAmount = (salesToday._sum.paidAmount ?? 0) + (returnsToday._sum.paidAmount ?? 0);
         const monthPaidAmount = (salesThisMonth._sum.paidAmount ?? 0) + (returnsThisMonth._sum.paidAmount ?? 0);
         const monthTaxAmount = (salesThisMonth._sum.taxAmount ?? 0) + (returnsThisMonth._sum.taxAmount ?? 0);
-        const monthItemDiscounts = monthSaleItems.reduce((s, item) => s + (item.discount || 0) * item.quantity, 0);
+        const monthItemDiscounts = monthItemAgg[0]?.itemDiscounts ?? 0;
         const monthDiscountTotal = (salesThisMonth._sum.discount ?? 0) + (returnsThisMonth._sum.discount ?? 0) + monthItemDiscounts;
 
         res.json({

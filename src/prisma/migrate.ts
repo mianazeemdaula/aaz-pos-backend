@@ -2,6 +2,14 @@ import fs from "fs";
 import path from "path";
 import { prisma } from "./prisma";
 
+async function tableExists(name: string): Promise<boolean> {
+    // ::text matters — Prisma's driver cannot deserialize a raw regclass value.
+    const rows = await prisma.$queryRaw<{ reg: string | null }[]>`
+    SELECT to_regclass(${"public." + name})::text AS reg
+  `;
+    return rows[0]?.reg != null;
+}
+
 type MigrationDir = {
     name: string;
     sqlPath: string;
@@ -42,12 +50,27 @@ export async function migrateDatabase() {
         return;
     }
 
+    const ledgerExisted = await tableExists("app_migrations");
+
     await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS app_migrations (
       name TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+
+    // Installs created before this ledger existed already have the full schema
+    // but no record of it. Without baselining, the first migration run would
+    // try to re-apply the initial migration, fail on "type already exists",
+    // and never reach the newer migrations behind it.
+    if (!ledgerExisted && (await tableExists("users"))) {
+        const baseline = migrationDirs[0];
+        console.log(`Existing database detected — baselining at ${baseline.name}`);
+        await prisma.$executeRaw`
+      INSERT INTO app_migrations (name) VALUES (${baseline.name})
+      ON CONFLICT (name) DO NOTHING
+    `;
+    }
 
     for (const migration of migrationDirs) {
         const alreadyApplied = await prisma.$queryRaw<{ name: string }[]>`

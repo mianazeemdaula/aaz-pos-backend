@@ -13,7 +13,15 @@
     "prod": "npm run build && npm run start",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prisma:generate": "prisma generate",
-    "prisma:seed": "ts-node-dev --respawn --transpile-only src/prisma/seed.ts"
+    "prisma:seed": "ts-node-dev --respawn --transpile-only src/prisma/seed.ts",
+    "perf:setup": "node perf/setup-db.js",
+    "perf:seed": "node perf/seed-volume.js --reset",
+    "perf:sql": "node perf/bench-sql.js --explain",
+    "perf:smoke": "node perf/run.js perf/smoke.js",
+    "perf:load": "node perf/run.js loadtest --mode=load",
+    "perf:stress": "node perf/run.js loadtest --mode=stress --duration=4000",
+    "perf:report": "node perf/report.js",
+    "perf:all": "npm run perf:sql && npm run perf:smoke && npm run perf:load && npm run perf:stress && npm run perf:report"
   },
   "keywords": [],
   "author": "",

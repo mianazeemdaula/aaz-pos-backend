@@ -36,10 +36,7 @@ export const listPurchases = async (req: Request, res: Response): Promise<void> 
                 items: {
                     some: {
                         product: {
-                            OR: [
-                                { name: { contains: q, mode: 'insensitive' } },
-                                { code: { contains: q, mode: 'insensitive' } }
-                            ]
+                            name: { contains: q, mode: 'insensitive' }
                         }
                     }
                 }
@@ -69,7 +66,11 @@ export const listPurchases = async (req: Request, res: Response): Promise<void> 
             prisma.purchase.count({ where }),
         ]);
         res.json(createPaginatedResponse(purchases, total, page, pageSize));
-    } catch {
+    } catch (error) {
+        // A bare `catch {}` here hid a broken search filter for months:
+        // the endpoint returned a generic 500 and the screen just showed
+        // no results. Log the cause.
+        console.error("listPurchases error:", error);
         res.status(500).json({ error: "Failed to fetch purchases" });
     }
 };

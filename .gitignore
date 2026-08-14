@@ -5,6 +5,7 @@ node_modules
 dist
 generated
 /generated/prisma
+/perf
 build
 *.exe
 build.zip
