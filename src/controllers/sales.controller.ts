@@ -196,18 +196,18 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
 
     try {
         // Validate all variants and get product info for stock/cost snapshot
-        const variantIds: number[] = items.map((i: any) => i.variantId);
+        const uniqueVariantIds: number[] = Array.from(new Set<number>(items.map((i: any) => Number(i.variantId))));
         const variants = await prisma.productVariant.findMany({
-            where: { id: { in: variantIds } },
+            where: { id: { in: uniqueVariantIds } },
             include: { product: true },
         });
 
-        if (variants.length !== variantIds.length) {
+        if (variants.length !== uniqueVariantIds.length) {
             res.status(400).json({ error: "One or more variants not found" });
             return;
         }
 
-        const variantMap = new Map(variants.map((v) => [v.id, v]));
+        const variantMap = new Map<number, any>(variants.map((v: any) => [v.id, v]));
 
         // Check cost price and discount limit (skip for returns)
         if (!isReturn) {

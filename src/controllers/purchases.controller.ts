@@ -186,19 +186,45 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
         }
 
         // Validate products
-        const productIds: number[] = items.map((i: any) => i.productId);
+        const parsedItems = items.map((i: any) => ({
+            ...i,
+            productId: Number(i.productId),
+            quantity: Number(i.quantity),
+            unitCost: Number(i.unitCost),
+            factor: i.factor && Number(i.factor) > 0 ? Number(i.factor) : 1,
+            discount: Number(i.discount ?? 0),
+            taxAmount: Number(i.taxAmount ?? 0),
+            sellingPrice: Number(i.sellingPrice ?? 0),
+        }));
+
+        for (const item of parsedItems) {
+            if (!item.productId || isNaN(item.productId) || item.productId <= 0) {
+                res.status(400).json({ error: "Each item must have a valid productId" });
+                return;
+            }
+            if (isNaN(item.quantity) || item.quantity === 0) {
+                res.status(400).json({ error: `Invalid quantity for productId ${item.productId}` });
+                return;
+            }
+            if (isNaN(item.unitCost) || item.unitCost < 0) {
+                res.status(400).json({ error: `Invalid unitCost for productId ${item.productId}` });
+                return;
+            }
+        }
+
+        const uniqueProductIds: number[] = Array.from(new Set<number>(parsedItems.map((i: any) => i.productId)));
         const products = await prisma.product.findMany({
-            where: { id: { in: productIds } },
+            where: { id: { in: uniqueProductIds } },
         });
-        if (products.length !== productIds.length) {
+        if (products.length !== uniqueProductIds.length) {
             res.status(400).json({ error: "One or more products not found" });
             return;
         }
-        const productMap = new Map(products.map((p) => [p.id, p]));
+        const productMap = new Map<number, any>(products.map((p: any) => [p.id, { ...p }]));
 
         // Apply variant factor to quantity: actual stock qty = qty * factor
-        const resolvedItems = items.map((item: any) => {
-            const factor = item.factor && item.factor > 0 ? item.factor : 1;
+        const resolvedItems = parsedItems.map((item: any) => {
+            const factor = item.factor;
             const effectiveQty = item.quantity * factor;
             return { ...item, quantity: effectiveQty, originalQty: item.quantity, factor };
         });
@@ -282,6 +308,10 @@ export const createPurchase = async (req: Request, res: Response): Promise<void>
                         newAvgCost = unitCostPerBaseUnit;
                     }
                 }
+
+                // Update in-memory product object for subsequent iterations with the same productId
+                product.totalStock = newTotalStock;
+                product.avgCostPrice = round2(newAvgCost);
 
                 await tx.product.update({
                     where: { id: product.id },
