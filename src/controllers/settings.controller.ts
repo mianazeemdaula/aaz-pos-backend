@@ -3,6 +3,7 @@ import { prisma } from "../prisma/prisma";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { invalidateAccessProfile } from "../services/auth";
 import {
     dumpDatabase, restoreDump, detectBackupKind, backupStatus,
     listDirectories, ensureBackupDir, backupToDirectory, latestBackup,
@@ -304,6 +305,10 @@ export const updateUserSettings = async (req: Request, res: Response): Promise<v
                 update: { value: strValue, type },
             });
         }
+        // Permissions live in these keys — drop the cached access profile so a
+        // grant or a revoke takes effect on the very next request.
+        invalidateAccessProfile(userId);
+
         // Return updated user settings
         const settings = await prisma.setting.findMany({ where: { key: { startsWith: prefix } } });
         const map: Record<string, unknown> = {};

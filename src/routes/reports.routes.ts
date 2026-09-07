@@ -23,11 +23,19 @@ import {
     getOverallPayablesReceivablesReportPDF,
     getCostAboveSalePriceReportPDF,
 } from "../controllers/reports.controller";
+import { authorize, DASHBOARD_READERS } from "../services/auth";
 
 const router = Router();
 
 // JSON endpoints
-router.get("/dashboard", getDashboardStats);
+// The dashboard tiles belong to the `dashboard` module, not to Reports — a
+// cashier with a dashboard may see them without being handed every financial
+// report below.
+router.get("/dashboard", authorize("reports", { readableBy: DASHBOARD_READERS }), getDashboardStats);
+
+// Everything from here on is the Reports module proper.
+router.use(authorize("reports"));
+
 // PDF report endpoints
 router.get("/overall-business", getOverallBusinessReportPDF);
 router.get("/payables-receivables", getOverallPayablesReceivablesReportPDF);

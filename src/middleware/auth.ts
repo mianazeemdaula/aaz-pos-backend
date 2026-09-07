@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-me";
 
+/** Verifies the bearer token and puts the caller on `req.user`. */
 export const authenticate = (
   req: Request,
   res: Response,
@@ -24,14 +25,8 @@ export const authenticate = (
   }
 };
 
-export const requireRole = (...roles: string[]) => (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-) => {
-  if (!req.user || !roles.includes(req.user.role)) {
-    res.status(403).json({ error: "Forbidden" });
-    return;
-  }
-  next();
-};
+// Authorisation lives in services/auth. The role on `req.user` comes from a
+// token that lasts a week, so a guard must re-read it from the database —
+// which is what `requireRole` there does, unlike the version that used to sit
+// here and trusted the token.
+export { requireRole, authorize } from "../services/auth";

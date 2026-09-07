@@ -1,6 +1,7 @@
 import { Router } from "express";
 import authRouter from "./auth";
 import { authenticate } from "../middleware/auth";
+import { authorize, ROUTE_POLICIES } from "../services/auth";
 import usersRouter from "./users.routes";
 import accountsRouter from "./accounts.routes";
 import customersRouter from "./customers.routes";
@@ -26,30 +27,66 @@ import importExportRouter from "./import-export.routes";
 
 const router = Router();
 
+// The only unauthenticated surface. /auth/register guards itself.
 router.use("/auth", authRouter);
 
-// All routes below require authentication
-router.use("/users", authenticate, usersRouter);
-router.use("/accounts", authenticate, accountsRouter);
-router.use("/customers", authenticate, customersRouter);
-router.use("/suppliers", authenticate, suppliersRouter);
-router.use("/categories", authenticate, categoriesRouter);
-router.use("/brands", authenticate, brandsRouter);
-router.use("/products", authenticate, productsRouter);
-router.use("/stock-movements", authenticate, stockMovementsRouter);
-router.use("/sales", authenticate, salesRouter);
-router.use("/purchases", authenticate, purchasesRouter);
-router.use("/packages", authenticate, packagesRouter);
-router.use("/employees", authenticate, employeesRouter);
-router.use("/salary-slips", authenticate, salarySlipsRouter);
-router.use("/expenses", authenticate, expensesRouter);
-router.use("/recurring-expenses", authenticate, recurringExpensesRouter);
-router.use("/advance-bookings", authenticate, advanceBookingsRouter);
-router.use("/promotions", authenticate, promotionsRouter);
-router.use("/held", authenticate, heldTransactionsRouter);
-router.use("/reports", authenticate, reportsRouter);
-router.use("/settings", authenticate, settingsRouter);
-router.use("/tax-schedules", authenticate, taxSchedulesRouter);
-router.use("/data", authenticate, importExportRouter);
+/** Every mounted API resource. Keys must match ROUTE_POLICIES exactly. */
+const MODULE_ROUTERS: Record<string, Router> = {
+    "/products": productsRouter,
+    "/packages": packagesRouter,
+    "/categories": categoriesRouter,
+    "/brands": brandsRouter,
+    "/accounts": accountsRouter,
+    "/customers": customersRouter,
+    "/suppliers": suppliersRouter,
+    "/promotions": promotionsRouter,
+    "/tax-schedules": taxSchedulesRouter,
+    "/sales": salesRouter,
+    "/purchases": purchasesRouter,
+    "/held": heldTransactionsRouter,
+    "/advance-bookings": advanceBookingsRouter,
+    "/stock-movements": stockMovementsRouter,
+    "/employees": employeesRouter,
+    "/salary-slips": salarySlipsRouter,
+    "/expenses": expensesRouter,
+    "/recurring-expenses": recurringExpensesRouter,
+    "/users": usersRouter,
+    "/data": importExportRouter,
+    "/reports": reportsRouter,
+    "/settings": settingsRouter,
+};
+
+/**
+ * Wire every resource from the policy table.
+ *
+ * Driving the router from the table rather than by hand means a new module
+ * cannot be mounted without an access decision: the checks below fail at start
+ * up if a router has no policy or a policy has no router. Permissions used to
+ * be enforced only in the browser, and this is what stops that recurring.
+ */
+const policyPaths = new Set(ROUTE_POLICIES.map((p) => p.path));
+const routerPaths = new Set(Object.keys(MODULE_ROUTERS));
+
+for (const path of routerPaths) {
+    if (!policyPaths.has(path)) {
+        throw new Error(`Route "${path}" is mounted with no entry in ROUTE_POLICIES — who may reach it?`);
+    }
+}
+for (const path of policyPaths) {
+    if (!routerPaths.has(path)) {
+        throw new Error(`ROUTE_POLICIES lists "${path}" but no router is mounted there.`);
+    }
+}
+
+for (const policy of ROUTE_POLICIES) {
+    const resource = MODULE_ROUTERS[policy.path];
+
+    if (policy.module) {
+        router.use(policy.path, authenticate, authorize(policy.module, policy.options), resource);
+    } else {
+        // Guards itself per route — one blanket rule would be wrong for all of them.
+        router.use(policy.path, authenticate, resource);
+    }
+}
 
 export default router;

@@ -2,20 +2,25 @@ import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { prisma } from "../prisma/prisma";
+import {
+  ADMIN_ROLE,
+  assertCanAssignRole,
+  assertValidRole,
+  getAccessProfile,
+  isAccessError,
+} from "../services/auth";
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-me";
 
-const VALID_ROLES = ["ADMIN", "MANAGER", "CASHIER", "DELIVERY_BOY", "WORKER"] as const;
-
 export const register = async (req: Request, res: Response): Promise<void> => {
-  const { name, username, password, role, phone, address } = req.body;
+  const { name, username, password, phone, address } = req.body;
+  // On a blank install the very first account must be able to administer the
+  // system, so it is created as an administrator whatever was asked for.
+  const isBootstrap = (req as Request & { isBootstrap?: boolean }).isBootstrap === true;
+  const role: string = isBootstrap ? ADMIN_ROLE : req.body.role;
+
   if (!name || !username || !password || !role) {
     res.status(400).json({ error: "name, username, password and role are required" });
-    return;
-  }
-
-  if (!VALID_ROLES.includes(role)) {
-    res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(", ")}` });
     return;
   }
 
@@ -25,6 +30,11 @@ export const register = async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
+    assertValidRole(role);
+    if (!isBootstrap) {
+      assertCanAssignRole({ id: req.user?.id ?? -1, role: req.user?.role ?? "" }, role);
+    }
+
     const existing = await prisma.user.findUnique({ where: { username } });
     if (existing) {
       res.status(409).json({ error: "Username already taken" });
@@ -47,6 +57,11 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       user: { id: user.id, name: user.name, username: user.username, role: user.role, createdAt: user.createdAt },
     });
   } catch (error) {
+    if (isAccessError(error)) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    console.error("Registration failed:", error);
     res.status(500).json({ error: "Registration failed" });
   }
 };
@@ -151,8 +166,13 @@ export const getMe = async (req: Request, res: Response): Promise<void> => {
       res.status(404).json({ error: "User not found" });
       return;
     }
-    res.json(user);
+
+    // Ship the resolved permissions alongside the profile so the client does
+    // not have to derive them itself and drift from what the API enforces.
+    const profile = await getAccessProfile(userId);
+    res.json({ ...user, permissions: profile?.permissions ?? null });
   } catch (error) {
+    console.error("Failed to fetch profile:", error);
     res.status(500).json({ error: "Failed to fetch profile" });
   }
 };
