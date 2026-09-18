@@ -67,6 +67,7 @@ const saleInclude = {
     items: true,
     payments: { include: { account: true } },
     customer: true,
+    user: { select: { id: true, name: true, username: true } },
 } as const;
 
 /**
