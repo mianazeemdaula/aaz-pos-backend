@@ -46,6 +46,7 @@ const DEFAULT_SETTINGS: Record<string, unknown> = {
     currency: "PKR",
     defaultTaxRate: 0,
     invoiceNote: "",
+    invoiceNoteUrdu: "",
 };
 
 let settingsCache: Record<string, any> = { ...DEFAULT_SETTINGS };
