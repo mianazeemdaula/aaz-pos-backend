@@ -11,6 +11,10 @@ import {
 } from "./helpers";
 import type { TableCell } from "../../utils/pdf/report-spec";
 import type { Tone } from "../../utils/pdf/report-theme";
+import { variantsByProduct, variantBreakdown } from "./variant-stock";
+
+/** `?variants=1` adds a column spelling stock out per variant; without it the report is unchanged. */
+const wantsVariants = (req: Request) => req.query.variants === "1" || req.query.variants === "true";
 
 async function getCategoryIdsRecursively(categoryId: number): Promise<number[]> {
     const ids = [categoryId];
@@ -46,6 +50,7 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
 
         const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
         const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
+        const showVariants = wantsVariants(req);
 
         const whereClause: any = { active: true };
         if (categoryId) {
@@ -71,6 +76,8 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
             orderBy: { name: "asc" },
         });
 
+        const variantMap = showVariants ? await variantsByProduct(products.map((p) => p.id)) : null;
+
         const lowStock = products.filter((p) => p.totalStock > 0 && p.totalStock <= p.reorderLevel);
         const outOfStock = products.filter((p) => p.totalStock <= 0);
         const totalValue = products.reduce((s, p) => s + p.totalStock * safeAvgCost(p.avgCostPrice, p.variants[0]?.price ?? 0), 0);
@@ -78,8 +85,8 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
 
         const report = createReport({
             title: "Inventory Report",
-            subtitle: "Product stock overview and valuation",
-            filename: reportFilename("inventory-report"),
+            subtitle: showVariants ? "Product stock overview and valuation, with variant breakdown" : "Product stock overview and valuation",
+            filename: reportFilename(showVariants ? "inventory-report-variants" : "inventory-report"),
             orientation: "landscape",
             filters: {
                 ...(await resolveScope(categoryId, brandId)),
@@ -113,6 +120,7 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
                     p.category.name,
                     p.brand?.name ?? "N/A",
                     fmtCurrency(p.totalStock),
+                    ...(variantMap ? [variantBreakdown(p.totalStock, variantMap.get(p.id) ?? [])] : []),
                     fmtCurrency(p.reorderLevel),
                     fmtCurrency(avgCost),
                     fmtCurrency(p.totalStock * avgCost),
@@ -126,22 +134,37 @@ export const getInventoryReportPDF = async (req: Request, res: Response): Promis
             });
 
             report.table({
-                columns: [
-                    { label: "#", width: 35, align: "center" },
-                    { label: "Product", width: "*" },
-                    { label: "Category", width: 92 },
-                    { label: "Brand", width: 80 },
-                    { label: "Stock", width: 62, align: "right" },
-                    { label: "Reorder", width: 62, align: "right" },
-                    { label: "Avg Cost", width: 74, align: "right" },
-                    { label: "Stock Value", width: 88, align: "right" },
-                    { label: "Status", width: 84, align: "center" },
-                ],
+                columns: variantMap
+                    ? [
+                        // Narrower fixed columns leave room for the variant text.
+                        { label: "#", width: 26, align: "center" },
+                        { label: "Product", width: "*" },
+                        { label: "Category", width: 80 },
+                        { label: "Brand", width: 70 },
+                        { label: "Stock", width: 50, align: "right" },
+                        { label: "Variants", width: 140 },
+                        { label: "Reorder", width: 50, align: "right" },
+                        { label: "Avg Cost", width: 64, align: "right" },
+                        { label: "Stock Value", width: 76, align: "right" },
+                        { label: "Status", width: 64, align: "center" },
+                    ]
+                    : [
+                        { label: "#", width: 35, align: "center" },
+                        { label: "Product", width: "*" },
+                        { label: "Category", width: 92 },
+                        { label: "Brand", width: 80 },
+                        { label: "Stock", width: 62, align: "right" },
+                        { label: "Reorder", width: 62, align: "right" },
+                        { label: "Avg Cost", width: 74, align: "right" },
+                        { label: "Stock Value", width: 88, align: "right" },
+                        { label: "Status", width: 84, align: "center" },
+                    ],
                 rows,
                 rowTones,
                 totalRow: [
                     { text: "Grand Total", colSpan: 4 },
                     fmtCurrency(totalUnits),
+                    ...(variantMap ? [""] : []),
                     "",
                     "",
                     fmtCurrency(totalValue),
@@ -161,6 +184,7 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
     const filter = (req.query.filter as string) ?? "all"; // all | negative | low | alert
     const categoryId = req.query.categoryId ? Number(req.query.categoryId) : undefined;
     const brandId = req.query.brandId ? Number(req.query.brandId) : undefined;
+    const showVariants = wantsVariants(req);
 
     try {
         const whereClause: any = { active: true, isService: false };
@@ -182,6 +206,8 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
             },
         });
 
+        const variantMap = showVariants ? await variantsByProduct(products.map((p) => p.id)) : null;
+
         const negative = products.filter(p => p.totalStock < 0);
         const lowStock = products.filter(p => p.totalStock >= 0 && p.totalStock <= p.reorderLevel);
         const normal = products.filter(p => p.totalStock > p.reorderLevel);
@@ -194,8 +220,8 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
 
         const report = createReport({
             title,
-            subtitle: "Inventory stock levels",
-            filename: `stock-report-${filter}-${dayjs().format("YYYY-MM-DD")}.pdf`,
+            subtitle: showVariants ? "Inventory stock levels, with variant breakdown" : "Inventory stock levels",
+            filename: `stock-report-${filter}${showVariants ? "-variants" : ""}-${dayjs().format("YYYY-MM-DD")}.pdf`,
             orientation: "landscape",
             filters: {
                 ...(await resolveScope(categoryId, brandId)),
@@ -229,6 +255,7 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
                     p.category.name,
                     defaultVariant?.barcode ?? "—",
                     String(p.totalStock),
+                    ...(variantMap ? [variantBreakdown(p.totalStock, variantMap.get(p.id) ?? [])] : []),
                     String(p.reorderLevel),
                     fmtCurrency(safeAvgCost(p.avgCostPrice, defaultVariant?.price ?? 0)),
                     {
@@ -241,16 +268,29 @@ export const getStockReportPDF = async (req: Request, res: Response): Promise<vo
             });
 
             report.table({
-                columns: [
-                    { label: "#", width: 26, align: "center" },
-                    { label: "Product Name", width: "*" },
-                    { label: "Category", width: 120 },
-                    { label: "Barcode", width: 100, align: "center" },
-                    { label: "Stock", width: 60, align: "center" },
-                    { label: "Reorder", width: 66, align: "center" },
-                    { label: "Avg Cost", width: 78, align: "right" },
-                    { label: "Status", width: 82, align: "center" },
-                ],
+                columns: variantMap
+                    ? [
+                        // Narrower fixed columns leave room for the variant text.
+                        { label: "#", width: 26, align: "center" },
+                        { label: "Product Name", width: "*" },
+                        { label: "Category", width: 90 },
+                        { label: "Barcode", width: 86, align: "center" },
+                        { label: "Stock", width: 50, align: "center" },
+                        { label: "Variants", width: 140 },
+                        { label: "Reorder", width: 54, align: "center" },
+                        { label: "Avg Cost", width: 70, align: "right" },
+                        { label: "Status", width: 70, align: "center" },
+                    ]
+                    : [
+                        { label: "#", width: 26, align: "center" },
+                        { label: "Product Name", width: "*" },
+                        { label: "Category", width: 120 },
+                        { label: "Barcode", width: 100, align: "center" },
+                        { label: "Stock", width: 60, align: "center" },
+                        { label: "Reorder", width: 66, align: "center" },
+                        { label: "Avg Cost", width: 78, align: "right" },
+                        { label: "Status", width: 82, align: "center" },
+                    ],
                 rows,
                 rowTones,
             });

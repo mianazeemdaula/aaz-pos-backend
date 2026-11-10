@@ -176,7 +176,8 @@ export const updateSettings = async (req: Request, res: Response): Promise<void>
 // ─── Business Logo ────────────────────────────────────────────────────────────
 
 const LOGO_DIR = path.join(process.cwd(), "uploads", "logo");
-const LOGO_PATH = path.join(LOGO_DIR, "logo.png");
+/** The logo uploaded from Settings → Company; PDF reports print it in their header. */
+export const LOGO_PATH = path.join(LOGO_DIR, "logo.png");
 
 export const uploadLogo = (req: Request, res: Response): void => {
     if (!req.file) { res.status(400).json({ error: "No file uploaded" }); return; }

@@ -58,13 +58,31 @@ export function getReportFontSet(): ReportFontSet {
     return fontSetCache;
 }
 
+/**
+ * Images (the logo) can be replaced from Settings while the app runs, so unlike
+ * fonts they are cached against the file's modified time and re-read when it changes.
+ */
+const imageCache = new Map<string, { mtimeMs: number; buffer: Buffer }>();
+
 /** Cached logo bytes. Returns undefined when the file is missing. */
 export function getImageAsset(filePath: string | undefined): Buffer | undefined {
-    return readCached(filePath);
+    if (!filePath) return undefined;
+    try {
+        const { mtimeMs } = fs.statSync(filePath);
+        const hit = imageCache.get(filePath);
+        if (hit && hit.mtimeMs === mtimeMs) return hit.buffer;
+        const buffer = fs.readFileSync(filePath);
+        imageCache.set(filePath, { mtimeMs, buffer });
+        return buffer;
+    } catch {
+        imageCache.delete(filePath);
+        return undefined;
+    }
 }
 
 /** Drop every cached buffer (used when the process wants the memory back). */
 export function clearAssetCache(): void {
     fileCache.clear();
+    imageCache.clear();
     fontSetCache = null;
 }

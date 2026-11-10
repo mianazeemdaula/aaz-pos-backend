@@ -1,9 +1,9 @@
 import { round2 } from "../../utils";
 import { assertSalePaymentRequirement, assertSalePricingPolicy } from "./create-sale.rules";
-import { assertReturnPolicy } from "./return-sale.rules";
+import { assertRefundDestination, assertReturnPolicy } from "./return-sale.rules";
 import { assertCashierPolicy } from "./cashier-policy";
 import { classifyCart } from "./sale-lines";
-import { buildItems, computeTotals } from "./sale-pricing";
+import { buildItems, computeTotals, linesSubtotal } from "./sale-pricing";
 import type { PrepareContext, SalePlan } from "./types";
 import { badRequest } from "./errors";
 
@@ -23,10 +23,21 @@ export function prepareExchange(ctx: PrepareContext): SalePlan {
         throw badRequest("prepareExchange expects a cart with both selling and return lines");
     }
 
-    assertSalePaymentRequirement({
-        hasPayments: ctx.payments.length > 0,
-        customerId: ctx.customerId,
-    });
+    // Which way the money flows decides how the exchange is settled. When the
+    // goods coming back are worth more than the goods going out, the shop owes
+    // the difference: that leg is a refund, so it follows the return rules —
+    // a walk-in needs an account to pay it from, and no "change" is handed back.
+    const netTotal = round2(linesSubtotal(ctx.lines) - round2(ctx.discount) + round2(ctx.taxAmount));
+    const refundDue = netTotal < 0;
+
+    if (refundDue) {
+        assertRefundDestination({ customerId: ctx.customerId, hasPayments: ctx.payments.length > 0 });
+    } else {
+        assertSalePaymentRequirement({
+            hasPayments: ctx.payments.length > 0,
+            customerId: ctx.customerId,
+        });
+    }
 
     // Return half. The original invoice is optional here — a counter swap is
     // settled against the new purchase, so the cashier is not forced to produce
@@ -71,7 +82,7 @@ export function prepareExchange(ctx: PrepareContext): SalePlan {
             discount: ctx.discount,
             taxAmount: ctx.taxAmount,
             payments: ctx.payments,
-            allowChange: true,
+            allowChange: !refundDue,
         }),
         items: buildItems(ctx.lines, ctx.variantMap),
         lines: ctx.lines,

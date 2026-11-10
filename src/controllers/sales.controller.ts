@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import { getPaginationParams, createPaginatedResponse } from "../utils";
 import { submitSale, isSaleError, type SaleRequestInput } from "../services/sales";
+import { forRole } from "../utils/cost-visibility";
 
 export const listSales = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
@@ -67,7 +68,7 @@ export const listSales = async (req: Request, res: Response): Promise<void> => {
             }),
             prisma.sale.count({ where }),
         ]);
-        res.json(createPaginatedResponse(sales, total, page, pageSize));
+        res.json(forRole(req.user?.role, createPaginatedResponse(sales, total, page, pageSize)));
     } catch (error) {
         // A bare `catch {}` here hid a broken search filter for months:
         // the endpoint returned a generic 500 and the screen just showed
@@ -98,7 +99,7 @@ export const getSale = async (req: Request, res: Response): Promise<void> => {
         });
         if (!sale) { res.status(404).json({ error: "Sale not found" }); return; }
         const enriched = await enrichSaleWithCustomerBalances(sale);
-        res.json(enriched);
+        res.json(forRole(req.user?.role, enriched));
     } catch {
         res.status(500).json({ error: "Failed to fetch sale" });
     }
@@ -108,7 +109,7 @@ export const createSale = async (req: Request, res: Response): Promise<void> => 
     try {
         const sale = await submitSale(req.body as SaleRequestInput, req.user?.id ?? null);
         const enriched = await enrichSaleWithCustomerBalances(sale);
-        res.status(201).json(enriched);
+        res.status(201).json(forRole(req.user?.role, enriched));
     } catch (err) {
         if (isSaleError(err)) {
             res.status(err.status).json({ error: err.message });
@@ -181,7 +182,7 @@ export const updateSale = async (req: Request, res: Response): Promise<void> => 
             return updated;
         });
 
-        res.json(result);
+        res.json(forRole(req.user?.role, result));
     } catch (err) {
         console.error("Error updating sale:", err);
         res.status(500).json({ error: "Failed to update sale" });

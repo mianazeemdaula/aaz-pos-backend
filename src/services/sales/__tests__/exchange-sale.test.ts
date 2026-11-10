@@ -184,6 +184,73 @@ describe("exchange cart: the returned half is still validated against the invoic
     });
 });
 
+describe("exchange cart: returned goods worth more than the new goods", () => {
+    // Customer hands back a 500 jacket and takes a 200 shirt — the shop owes 300.
+    const sold = variant({ name: "Shirt", price: 200, avgCostPrice: 120 });
+    const returned = variant({ name: "Jacket", price: 500, avgCostPrice: 300 });
+    const lines = linesOf(rawItem(sold, 1, 200), rawItem(returned, -1, 500));
+    const vm = variantMapOf(sold, returned);
+
+    it("lets a walk-in exchange through when the refund is paid from an account", () => {
+        const plan = prepareExchange(ctx({ lines, variantMap: vm, payments: [payment(-300)] }));
+        assert.equal(plan.kind, "EXCHANGE");
+        assert.equal(plan.totals.totalAmount, -300);
+        assert.equal(plan.totals.paidAmount, -300);
+        assert.equal(plan.totals.netPaidAmount, -300);
+        assert.equal(plan.totals.changeAmount, 0);
+        assert.equal(plan.totals.payments[0].amount, -300);
+        assert.equal(plan.totals.payments[0].changeAmount, 0);
+    });
+
+    it("asks a walk-in for a refund account, not a sale payment", () => {
+        const err = errorFrom(() => prepareExchange(ctx({ lines, variantMap: vm, payments: [] })));
+        assert.match(String(err), /Refund payment account is required/);
+    });
+
+    it("credits a known customer with whatever is not refunded now", () => {
+        const plan = prepareExchange(ctx({ lines, variantMap: vm, customerId: 7, payments: [payment(-100)] }));
+        assert.equal(plan.totals.totalAmount, -300);
+        assert.equal(plan.totals.netPaidAmount, -100);
+        assert.equal(plan.totals.changeAmount, 0);
+        assert.equal(plan.totals.payments[0].amount, -100);
+    });
+
+    it("lets a known customer take the whole refund as credit", () => {
+        const plan = prepareExchange(ctx({ lines, variantMap: vm, customerId: 7, payments: [] }));
+        assert.equal(plan.totals.totalAmount, -300);
+        assert.equal(plan.totals.netPaidAmount, 0);
+    });
+
+    it("still applies the cost-price policy to the selling line", () => {
+        const err = errorFrom(() =>
+            prepareExchange(
+                ctx({
+                    lines: linesOf(rawItem(sold, 1, 200, 100), rawItem(returned, -1, 500)),
+                    variantMap: vm,
+                    payments: [payment(-400)],
+                })
+            )
+        );
+        assert.match(String(err), /below cost price for Shirt/);
+    });
+
+    it("still validates the returned line against a cited invoice", () => {
+        const parent = parentSale({ id: 50, items: [{ variant: returned, quantity: 1 }] });
+        const err = errorFrom(() =>
+            prepareExchange(
+                ctx({
+                    lines: linesOf(rawItem(sold, 1, 200), rawItem(returned, -2, 500)),
+                    variantMap: vm,
+                    parentSale: parent,
+                    parentSaleId: 50,
+                    payments: [payment(-800)],
+                })
+            )
+        );
+        assert.match(String(err), /Cannot return 2 units of Jacket/);
+    });
+});
+
 describe("line splitting helpers", () => {
     const a = variant();
     const b = variant();

@@ -1,0 +1,29 @@
+BEGIN;
+
+TRUNCATE TABLE
+  -- sales
+  sale_payments, sale_items, sales, held_sales,
+  -- purchases
+  purchase_payments, purchase_items, purchases, held_purchases,
+  -- stock
+  stock_movements,
+  -- customers
+  customer_payments, customer_ledger, customers,
+  -- suppliers
+  supplier_payments, supplier_ledger, suppliers,
+  -- accounts activity (accounts table itself is kept)
+  account_transfers,
+  -- expenses
+  expenses, recurring_expenses,
+  -- employees / payroll
+  salary_slips, employee_advances, employee_ledger, employees,
+  -- bookings, packages, promotions
+  advance_booking_items, advance_bookings,
+  package_items, packages,
+  promotion_items, promotions
+RESTART IDENTITY;
+
+-- Reset item quantities
+UPDATE products SET "totalStock" = 0, "updatedAt" = NOW();
+
+COMMIT;

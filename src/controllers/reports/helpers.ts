@@ -1,14 +1,11 @@
 import dayjs from "dayjs";
 import fs from "fs";
-import path from "path";
 import { ReportBuilder, ReportBuilderOptions } from "../../utils/pdf/report-spec";
 import { sendReport } from "../../utils/pdf/report";
-import { readSettings } from "../settings.controller";
+import { readSettings, LOGO_PATH as UPLOADED_LOGO_PATH } from "../settings.controller";
 
 export { readSettings, sendReport };
 export type { ReportBuilder };
-
-export const logoPath = path.join(__dirname, "../../../logo/logo.jpg");
 
 export function fmtCurrency(v: any) {
     return v != null ? Number(v).toLocaleString() : "0";
@@ -32,13 +29,27 @@ export function safeAvgCost(avgCostPrice: number, variantPrice: number): number 
     return fallback > 0 ? fallback : 0;
 }
 
-/** Probed once — the logo either ships with the install or it does not. */
-let logoExists: boolean | null = null;
-function resolveLogoPath(): string | undefined {
-    if (logoExists === null) {
-        logoExists = fs.existsSync(logoPath);
+/** PDFKit can only draw PNG and JPEG; anything else would leave a blank header. */
+function isPngOrJpeg(filePath: string): boolean {
+    let fd: number | undefined;
+    try {
+        fd = fs.openSync(filePath, "r");
+        const head = Buffer.alloc(4);
+        fs.readSync(fd, head, 0, 4, 0);
+        return head.readUInt32BE(0) === 0x89504e47 || (head[0] === 0xff && head[1] === 0xd8);
+    } catch {
+        return false;
+    } finally {
+        if (fd !== undefined) fs.closeSync(fd);
     }
-    return logoExists ? logoPath : undefined;
+}
+
+/**
+ * Reports carry the business's own logo from Settings → Company, or none at all.
+ * Checked on every report because the upload can change or be removed at any time.
+ */
+function resolveLogoPath(): string | undefined {
+    return isPngOrJpeg(UPLOADED_LOGO_PATH) ? UPLOADED_LOGO_PATH : undefined;
 }
 
 export type ReportOptions = Omit<ReportBuilderOptions, "company" | "logoPath" | "stamp"> & {

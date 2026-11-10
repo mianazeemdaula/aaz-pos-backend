@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { prisma } from "../prisma/prisma";
 import { getPaginationParams, createPaginatedResponse, round2 } from "../utils";
+import { editPurchase, PurchaseEditError } from "../services/purchases/edit-purchase";
 
 export const listPurchases = async (req: Request, res: Response): Promise<void> => {
     const { page, pageSize, skip } = getPaginationParams(req);
@@ -85,7 +86,7 @@ export const getPurchase = async (req: Request, res: Response): Promise<void> =>
                 user: { select: { id: true, name: true } },
                 account: true,
                 payments: { include: { account: true } },
-                items: { include: { product: true } },
+                items: { include: { product: { include: { variants: true } } } },
                 parentPurchase: { select: { id: true, invoiceNo: true } },
                 returns: {
                     include: {
@@ -362,6 +363,23 @@ export const updatePurchase = async (req: Request, res: Response): Promise<void>
     const id = parseInt(req.params.id);
     const { supplierId, note, invoiceNo } = req.body;
 
+    // A body with items is a full edit: lines, payments and totals are rewritten and
+    // stock, average cost, accounts and the supplier ledger follow.
+    if (Array.isArray(req.body.items)) {
+        try {
+            const updated = await prisma.$transaction((tx) => editPurchase(tx, id, req.body), { timeout: 30_000 });
+            res.json(updated);
+        } catch (err) {
+            if (err instanceof PurchaseEditError) {
+                res.status(err.status).json({ error: err.message });
+                return;
+            }
+            console.error("Error editing purchase:", err);
+            res.status(500).json({ error: "Failed to edit purchase" });
+        }
+        return;
+    }
+
     try {
         const purchase = await prisma.purchase.findUnique({ where: { id } });
         if (!purchase) {
@@ -380,8 +398,10 @@ export const updatePurchase = async (req: Request, res: Response): Promise<void>
 
                 // Delete old supplier's ledger entries for this purchase
                 if (purchase.supplierId) {
+                    // Only this PO's bill entry: PAYMENT rows keep a payment id in referenceId,
+                    // which can collide with a purchase id.
                     await tx.supplierLedger.deleteMany({
-                        where: { supplierId: purchase.supplierId, referenceId: purchase.id },
+                        where: { supplierId: purchase.supplierId, referenceId: purchase.id, type: { in: ["PURCHASE", "PURCHASE_RETURN"] } },
                     });
                 }
 
